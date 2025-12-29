@@ -13,3 +13,5 @@ target_link_libraries(
             pdb::libpdb
             Catch2::Catch2WithMain
 )
+
+add_subdirectory("targets")
