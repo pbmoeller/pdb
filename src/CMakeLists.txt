@@ -1,5 +1,5 @@
 add_library(libpdb
-    "libpdb.cpp"
+    "process.cpp"
 )
 add_library(pdb::libpdb ALIAS libpdb)
 
