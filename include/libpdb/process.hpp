@@ -1,5 +1,5 @@
-#ifndef PDB_PROCESS_HPP
-#define PDB_PROCESS_HPP
+#ifndef LIBPDB_PROCESS_HPP
+#define LIBPDB_PROCESS_HPP
 
 #include <sys/types.h>
 
@@ -32,7 +32,7 @@ public:
     Process& operator=(const Process&) = delete;
     ~Process();
 
-    static std::unique_ptr<Process> launch(std::filesystem::path path);
+    static std::unique_ptr<Process> launch(std::filesystem::path path, bool debug = true);
     static std::unique_ptr<Process> attach(pid_t pid);
 
     void resume();
@@ -42,14 +42,15 @@ public:
     ProcessState state() const { return m_state; }
 
 private:
-    Process(pid_t pid, bool terminateOnEnd);
+    Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 
 private:
     pid_t m_pid{0};
     bool m_terminateOnEnd{true};
     ProcessState m_state{ProcessState::Stopped};
+    bool m_isAttached{true};
 };
 
 } // namespace pdb
 
-#endif // PDB_PROCESS_HPP
+#endif // LIBPDB_PROCESS_HPP

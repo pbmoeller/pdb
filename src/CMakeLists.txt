@@ -1,7 +1,29 @@
-add_library(libpdb
+set(LIBPDB_HEADERS
+    "${CMAKE_SOURCE_DIR}/include/libpdb/error.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/pipe.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/process.hpp"
+)
+
+set(LIBPDB_SOURCES
+    "pipe.cpp"
     "process.cpp"
 )
+
+add_library(libpdb)
 add_library(pdb::libpdb ALIAS libpdb)
+
+target_sources(libpdb
+    PRIVATE
+        ${LIBPDB_SOURCES}
+)
+
+target_sources(libpdb
+    PUBLIC
+        FILE_SET    public_headers
+        TYPE        HEADERS
+        BASE_DIRS   "${CMAKE_SOURCE_DIR}/include"
+        FILES       ${LIBPDB_HEADERS}
+)
 
 set_target_properties(
     libpdb
@@ -31,11 +53,7 @@ install(
     LIBRARY DESTINATION "${CMAKE_INSTALL_LIBDIR}"
     RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}"
     INCLUDES DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
-)
-
-install(
-    DIRECTORY "${CMAKE_SOURCE_DIR}/include/"
-    DESTINATION "${CMAKE_INSTALL_INCLUDEDIR}"
+    FILE_SET public_headers
 )
 
 install(
