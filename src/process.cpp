@@ -122,13 +122,61 @@ StopReason Process::waitOnSignal()
     }
     StopReason reason(waitStatus);
     m_state = reason.reason;
+
+    if(m_isAttached && m_state == ProcessState::Stopped) {
+        readAllRegisters();
+    }
+
     return reason;
+}
+
+void Process::writeUserArea(size_t offset, uint64_t data)
+{
+    if(ptrace(PTRACE_POKEUSER, m_pid, offset, data)) {
+        Error::sendErrno("Could not write to user data.");
+    }
+}
+
+void Process::writeFprs(const user_fpregs_struct& fprs)
+{
+    if(ptrace(PTRACE_SETFPREGS, m_pid, nullptr, &fprs) < 0) {
+        Error::sendErrno("Could not write floating point registers");
+    }
+}
+
+void Process::writeGprs(const user_regs_struct& gprs)
+{
+    if(ptrace(PTRACE_SETREGS, m_pid, nullptr, &gprs) < 0) {
+        Error::sendErrno("Could not write general purpose registers");
+    }
 }
 
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)
     : m_pid(pid)
     , m_terminateOnEnd(terminateOnEnd)
     , m_isAttached(isAttached)
+    , m_registers(new Registers(*this))
 { }
+
+void Process::readAllRegisters()
+{
+    if(ptrace(PTRACE_GETREGS, m_pid, nullptr, &getRegisters().m_data.regs) < 0) {
+        Error::sendErrno("ptrace GETREGS failed. Could not read GPR registers");
+    }
+    if(ptrace(PTRACE_GETFPREGS, m_pid, nullptr, &getRegisters().m_data.i387) < 0) {
+        Error::sendErrno("ptrace GETFPREGS failed. Could not read FPR registers");
+    }
+    for(int i = 0; i < 8; ++i) {
+        auto id   = static_cast<int>(RegisterId::dr0) + i;
+        auto info = registerInfoById(static_cast<RegisterId>(id));
+
+        errno        = 0;
+        int64_t data = ptrace(PTRACE_PEEKUSER, m_pid, info.offset, nullptr);
+        if(errno != 0) {
+            Error::sendErrno("Could not read debug register");
+        }
+        getRegisters().m_data.u_debugreg[i] = data;
+    }
+}
 
 } // namespace pdb

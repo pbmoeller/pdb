@@ -1,12 +1,18 @@
 set(LIBPDB_HEADERS
+    "${CMAKE_SOURCE_DIR}/include/libpdb/bit.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/error.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/pipe.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/process.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/registers.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/register_info.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/types.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/detail/registers.inc"
 )
 
 set(LIBPDB_SOURCES
     "pipe.cpp"
     "process.cpp"
+    "registers.cpp"
 )
 
 add_library(libpdb)
