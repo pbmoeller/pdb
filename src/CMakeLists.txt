@@ -1,6 +1,7 @@
 set(LIBPDB_HEADERS
     "${CMAKE_SOURCE_DIR}/include/libpdb/bit.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/error.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/parse.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/pipe.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/process.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/registers.hpp"

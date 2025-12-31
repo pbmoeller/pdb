@@ -2,6 +2,7 @@
 #define LIBPDB_PROCESS_HPP
 
 #include <libpdb/registers.hpp>
+#include <libpdb/types.hpp>
 
 #include <sys/types.h>
 
@@ -52,6 +53,11 @@ public:
 
     void writeFprs(const user_fpregs_struct& fprs);
     void writeGprs(const user_regs_struct& gprs);
+
+    VirtAddr getProgramCounter() const
+    {
+        return VirtAddr{getRegisters().readByIdAs<uint64_t>(RegisterId::rip)};
+    }
 
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
