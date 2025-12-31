@@ -5,3 +5,12 @@ add_executable(run_endlessly
 add_executable(end_immediately
     "end_immediately.cpp"
 )
+
+add_executable(reg_write
+    "reg_write.s"
+)
+target_compile_options(reg_write 
+    PRIVATE 
+        -pie
+)
+
