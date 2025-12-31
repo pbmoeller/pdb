@@ -124,7 +124,38 @@ TEST_CASE("Write register works", "[register]") {
 
     output = channel.read();
     REQUIRE(pdb::toStringView(output) == "42.24");
+}
 
+TEST_CASE("Read register works", "[register]")
+{
+    auto proc = pdb::Process::launch("targets/reg_read");
+    auto &regs = proc->getRegisters();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(regs.readByIdAs<uint64_t>(pdb::RegisterId::r13) == 0xcafecafe);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(regs.readByIdAs<uint8_t>(pdb::RegisterId::r13b) == 42);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(regs.readByIdAs<pdb::byte64>(pdb::RegisterId::mm0) == pdb::toByte64(0xba5eba11));
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto b = pdb::toByte128(64.125);
+    REQUIRE(regs.readByIdAs<pdb::byte128>(pdb::RegisterId::xmm0) == b);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(regs.readByIdAs<long double>(pdb::RegisterId::st0) == 64.125L);
 }
 
 
