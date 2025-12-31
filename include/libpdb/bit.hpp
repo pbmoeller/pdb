@@ -4,6 +4,8 @@
 #include <libpdb/types.hpp>
 
 #include <cstring>
+#include <vector>
+#include <string_view>
 
 namespace pdb {
 
@@ -41,6 +43,16 @@ byte128 toByte128(From src)
     byte128 ret{};
     std::memcpy(&ret, &src, sizeof(From));
     return ret;
+}
+
+inline std::string_view toStringView(const std::byte* data, size_t size)
+{
+    return {reinterpret_cast<const char*>(data), size};
+}
+
+inline std::string_view toStringView(const std::vector<std::byte>& data)
+{
+    return toStringView(data.data(), data.size());
 }
 
 } // namespace pdb

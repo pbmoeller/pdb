@@ -1,5 +1,8 @@
+#include <libpdb/bit.hpp>
 #include <libpdb/error.hpp>
+#include <libpdb/pipe.hpp>
 #include <libpdb/process.hpp>
+#include <libpdb/registers.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -76,3 +79,52 @@ TEST_CASE("Process::resume already terminated", "[Process]")
     proc->waitOnSignal();
     REQUIRE_THROWS_AS(proc->resume(), pdb::Error);
 }
+
+TEST_CASE("Write register works", "[register]") {
+    bool closeOnExec = false;
+    pdb::Pipe channel(closeOnExec);
+
+    auto proc = pdb::Process::launch("targets/reg_write", true, channel.getWrite());
+    channel.closeWrite();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto& regs = proc->getRegisters();
+    regs.writeById(pdb::RegisterId::rsi, 0xcafecafe);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto output = channel.read();
+    REQUIRE(pdb::toStringView(output) == "0xcafecafe");
+
+    regs.writeById(pdb::RegisterId::mm0, 0xba5eba11);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    output = channel.read();
+    REQUIRE(pdb::toStringView(output) == "0xba5eba11");
+
+    regs.writeById(pdb::RegisterId::xmm0, 42.24);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    output = channel.read();
+    REQUIRE(pdb::toStringView(output) == "42.24");
+
+    regs.writeById(pdb::RegisterId::st0, 42.24L);
+    regs.writeById(pdb::RegisterId::fsw, uint16_t{0b0011100000000000});
+    regs.writeById(pdb::RegisterId::ftw, uint16_t{0b0011111111111111});
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    output = channel.read();
+    REQUIRE(pdb::toStringView(output) == "42.24");
+
+}
+
+
