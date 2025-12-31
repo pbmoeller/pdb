@@ -107,7 +107,7 @@ DEFINE_GPR_8L(r15b, r15),
 
 #define DEFINE_FPR(name, dwarf_id, user_name) \
     DEFINE_REGISTER(name, dwarf_id, FPR_SIZE(user_name), FPR_OFFSET(user_name), \
-        pdb::RegisterType::FPR, pdb::RegisterFormat::DOUBLE_FLOAT)
+        pdb::RegisterType::FPR, pdb::RegisterFormat::UINT)
 
 #define DEFINE_FP_ST(number) \
     DEFINE_REGISTER(st ## number, (33 + number), 16, \
