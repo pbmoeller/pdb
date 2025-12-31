@@ -7,6 +7,7 @@
 
 #include <filesystem>
 #include <memory>
+#include <optional>
 
 namespace pdb {
 
@@ -34,7 +35,8 @@ public:
     Process& operator=(const Process&) = delete;
     ~Process();
 
-    static std::unique_ptr<Process> launch(std::filesystem::path path, bool debug = true);
+    static std::unique_ptr<Process> launch(std::filesystem::path path, bool debug = true,
+                                           std::optional<int> stdoutReplacement = std::nullopt);
     static std::unique_ptr<Process> attach(pid_t pid);
 
     void resume();

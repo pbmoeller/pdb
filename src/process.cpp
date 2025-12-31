@@ -55,7 +55,8 @@ Process::~Process()
     }
 }
 
-std::unique_ptr<Process> Process::launch(std::filesystem::path path, bool debug)
+std::unique_ptr<Process> Process::launch(std::filesystem::path path, bool debug,
+                                         std::optional<int> stdoutReplacement)
 {
     Pipe channel(true);
     pid_t pid;
@@ -65,6 +66,11 @@ std::unique_ptr<Process> Process::launch(std::filesystem::path path, bool debug)
 
     if(pid == 0) {
         channel.closeRead();
+        if(stdoutReplacement) {
+            if(dup2(*stdoutReplacement, STDOUT_FILENO) < 0) {
+                exitWithPerror(channel, "dup2 failed");
+            }
+        }
         if(debug && ptrace(PTRACE_TRACEME, 0, nullptr, nullptr) < 0) {
             exitWithPerror(channel, "ptrace TRACEME failed");
         }
