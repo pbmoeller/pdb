@@ -29,7 +29,6 @@ public:
         return std::get<T>(read(registerInfoById(id)));
     }
 
-    template<typename T>
     void writeById(RegisterId id, Value value) {
         write(registerInfoById(id), value);
     }
