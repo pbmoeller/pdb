@@ -1,16 +1,19 @@
 set(LIBPDB_HEADERS
     "${CMAKE_SOURCE_DIR}/include/libpdb/bit.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/breakpoint_site.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/error.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/parse.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/pipe.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/process.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/registers.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/register_info.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/stoppoint_collection.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/types.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/detail/registers.inc"
 )
 
 set(LIBPDB_SOURCES
+    "breakpoint_site.cpp"
     "pipe.cpp"
     "process.cpp"
     "registers.cpp"

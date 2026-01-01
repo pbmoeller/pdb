@@ -1,7 +1,9 @@
 #ifndef LIBPDB_PROCESS_HPP
 #define LIBPDB_PROCESS_HPP
 
+#include <libpdb/breakpoint_site.hpp>
 #include <libpdb/registers.hpp>
+#include <libpdb/stoppoint_collection.hpp>
 #include <libpdb/types.hpp>
 
 #include <sys/types.h>
@@ -59,6 +61,11 @@ public:
         return VirtAddr{getRegisters().readByIdAs<uint64_t>(RegisterId::rip)};
     }
 
+    BreakpointSite& createBreakpointSite(VirtAddr address);
+
+    StoppointCollection<BreakpointSite>& breakpointSites() { return m_breakpointSites; }
+    const StoppointCollection<BreakpointSite>& breakpointSites() const { return m_breakpointSites; }
+
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 
@@ -70,6 +77,7 @@ private:
     ProcessState m_state{ProcessState::Stopped};
     bool m_isAttached{true};
     std::unique_ptr<Registers> m_registers;
+    StoppointCollection<BreakpointSite> m_breakpointSites;
 };
 
 } // namespace pdb

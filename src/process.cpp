@@ -157,6 +157,15 @@ void Process::writeGprs(const user_regs_struct& gprs)
     }
 }
 
+BreakpointSite& Process::createBreakpointSite(VirtAddr address)
+{
+    if(m_breakpointSites.containsAddress(address)) {
+        Error::send("Breakpoint site already created at address " + std::to_string(address.addr()));
+    }
+    return m_breakpointSites.push(
+        std::unique_ptr<BreakpointSite>(new BreakpointSite(*this, address)));
+}
+
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)
     : m_pid(pid)
     , m_terminateOnEnd(terminateOnEnd)

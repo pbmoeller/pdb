@@ -6,15 +6,16 @@
 
 #include <catch2/catch_test_macros.hpp>
 
-#include <sys/types.h>
 #include <signal.h>
+#include <sys/types.h>
 
 #include <fstream>
 #include <string>
 
 namespace {
 
-bool processExists(pid_t pid) {
+bool processExists(pid_t pid)
+{
     auto ret = kill(pid, 0);
     return ret != -1 && errno != ESRCH;
 }
@@ -45,11 +46,12 @@ TEST_CASE("Process::launch no such program", "[Process]")
 TEST_CASE("Process::attach success", "[Process]")
 {
     auto target = pdb::Process::launch("targets/run_endlessly", false);
-    auto proc = pdb::Process::attach(target->pid());
+    auto proc   = pdb::Process::attach(target->pid());
     REQUIRE(getProcessStatus(target->pid()) == 't');
 }
 
-TEST_CASE("Process::attach invalid PID", "[Process]") {
+TEST_CASE("Process::attach invalid PID", "[Process]")
+{
     REQUIRE_THROWS_AS(pdb::Process::attach(0), pdb::Error);
 }
 
@@ -58,7 +60,7 @@ TEST_CASE("Process::resume success", "[Process]")
     {
         auto proc = pdb::Process::launch("targets/run_endlessly");
         proc->resume();
-        auto status = getProcessStatus(proc->pid());
+        auto status  = getProcessStatus(proc->pid());
         auto success = status == 'R' || status == 'S';
         REQUIRE(success);
     }
@@ -80,7 +82,8 @@ TEST_CASE("Process::resume already terminated", "[Process]")
     REQUIRE_THROWS_AS(proc->resume(), pdb::Error);
 }
 
-TEST_CASE("Write register works", "[register]") {
+TEST_CASE("Write register works", "[register]")
+{
     bool closeOnExec = false;
     pdb::Pipe channel(closeOnExec);
 
@@ -128,8 +131,8 @@ TEST_CASE("Write register works", "[register]") {
 
 TEST_CASE("Read register works", "[register]")
 {
-    auto proc = pdb::Process::launch("targets/reg_read");
-    auto &regs = proc->getRegisters();
+    auto proc  = pdb::Process::launch("targets/reg_read");
+    auto& regs = proc->getRegisters();
 
     proc->resume();
     proc->waitOnSignal();
@@ -158,4 +161,105 @@ TEST_CASE("Read register works", "[register]")
     REQUIRE(regs.readByIdAs<long double>(pdb::RegisterId::st0) == 64.125L);
 }
 
+TEST_CASE("Can create BreakpointSite", "[breakpoint]")
+{
+    auto proc  = pdb::Process::launch("targets/run_endlessly");
+    auto& site = proc->createBreakpointSite(pdb::VirtAddr{42});
+    REQUIRE(site.address().addr() == 42);
+}
 
+TEST_CASE("BreakpointSite ids increase", "[breakpoint]")
+{
+    auto proc = pdb::Process::launch("targets/run_endlessly");
+
+    auto& s1 = proc->createBreakpointSite(pdb::VirtAddr{42});
+    REQUIRE(s1.address().addr() == 42);
+
+    auto& s2 = proc->createBreakpointSite(pdb::VirtAddr{43});
+    REQUIRE(s2.id() == s1.id() + 1);
+
+    auto& s3 = proc->createBreakpointSite(pdb::VirtAddr{44});
+    REQUIRE(s3.id() == s1.id() + 2);
+
+    auto& s4 = proc->createBreakpointSite(pdb::VirtAddr{45});
+    REQUIRE(s4.id() == s1.id() + 3);
+}
+
+TEST_CASE("Can find BreakpointSite", "[breakpoint]")
+{
+    auto proc         = pdb::Process::launch("targets/run_endlessly");
+    const auto& cproc = proc;
+
+    proc->createBreakpointSite(pdb::VirtAddr{42});
+    proc->createBreakpointSite(pdb::VirtAddr{43});
+    proc->createBreakpointSite(pdb::VirtAddr{44});
+    proc->createBreakpointSite(pdb::VirtAddr{45});
+
+    auto& s1 = proc->breakpointSites().getByAddress(pdb::VirtAddr{44});
+    REQUIRE(proc->breakpointSites().containsAddress(pdb::VirtAddr{44}));
+    REQUIRE(s1.address().addr() == 44);
+
+    auto& cs1 = cproc->breakpointSites().getByAddress(pdb::VirtAddr{44});
+    REQUIRE(cproc->breakpointSites().containsAddress(pdb::VirtAddr{44}));
+    REQUIRE(cs1.address().addr() == 44);
+
+    auto& s2 = proc->breakpointSites().getById(s1.id() + 1);
+    REQUIRE(proc->breakpointSites().containsId(s1.id() + 1));
+    REQUIRE(s2.id() == s1.id() + 1);
+    REQUIRE(s2.address().addr() == 45);
+
+    auto& cs2 = cproc->breakpointSites().getById(cs1.id() + 1);
+    REQUIRE(cproc->breakpointSites().containsId(cs1.id() + 1));
+    REQUIRE(cs2.id() == cs1.id() + 1);
+    REQUIRE(cs2.address().addr() == 45);
+}
+
+TEST_CASE("Cannot find BreakpointSite", "[breakpoint]")
+{
+    auto proc         = pdb::Process::launch("targets/run_endlessly");
+    const auto& cproc = proc;
+
+    REQUIRE_THROWS_AS(proc->breakpointSites().getByAddress(pdb::VirtAddr{44}), pdb::Error);
+    REQUIRE_THROWS_AS(proc->breakpointSites().getById(44), pdb::Error);
+    REQUIRE_THROWS_AS(cproc->breakpointSites().getByAddress(pdb::VirtAddr{44}), pdb::Error);
+    REQUIRE_THROWS_AS(cproc->breakpointSites().getById(44), pdb::Error);
+}
+
+TEST_CASE("BreakpointSite list size and emptiness", "[breakpoint]")
+{
+    auto proc         = pdb::Process::launch("targets/run_endlessly");
+    const auto& cproc = proc;
+
+    REQUIRE(proc->breakpointSites().empty());
+    REQUIRE(proc->breakpointSites().size() == 0);
+    REQUIRE(cproc->breakpointSites().empty());
+    REQUIRE(cproc->breakpointSites().size() == 0);
+
+    proc->createBreakpointSite(pdb::VirtAddr{42});
+    REQUIRE(!proc->breakpointSites().empty());
+    REQUIRE(proc->breakpointSites().size() == 1);
+    REQUIRE(!cproc->breakpointSites().empty());
+    REQUIRE(cproc->breakpointSites().size() == 1);
+
+    proc->createBreakpointSite(pdb::VirtAddr{45});
+    REQUIRE(!proc->breakpointSites().empty());
+    REQUIRE(proc->breakpointSites().size() == 2);
+    REQUIRE(!cproc->breakpointSites().empty());
+    REQUIRE(cproc->breakpointSites().size() == 2);
+}
+
+TEST_CASE("Can iterate BreakpointSite", "[breakpoint]")
+{
+    auto proc         = pdb::Process::launch("targets/run_endlessly");
+    const auto& cproc = proc;
+
+    proc->createBreakpointSite(pdb::VirtAddr{42});
+    proc->createBreakpointSite(pdb::VirtAddr{43});
+    proc->createBreakpointSite(pdb::VirtAddr{44});
+    proc->createBreakpointSite(pdb::VirtAddr{45});
+
+    proc->breakpointSites().forEach(
+        [addr = 42](auto& site) mutable { REQUIRE(site.address().addr() == addr++); });
+    cproc->breakpointSites().forEach(
+        [addr = 42](auto& site) mutable { REQUIRE(site.address().addr() == addr++); });
+}
