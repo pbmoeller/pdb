@@ -100,7 +100,7 @@ auto StoppointCollection<Stoppoint>::getByAddress(VirtAddr address) -> Stoppoint
 template<typename Stoppoint>
 auto StoppointCollection<Stoppoint>::getByAddress(VirtAddr address) const -> const Stoppoint&
 {
-    return const_cast<StoppointCollection<Stoppoint>*>(this)->getById(address);
+    return const_cast<StoppointCollection<Stoppoint>*>(this)->getByAddress(address);
 }
 
 template<typename Stoppoint>
