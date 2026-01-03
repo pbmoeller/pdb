@@ -1,7 +1,9 @@
 #include <libpdb/error.hpp>
 #include <libpdb/pipe.hpp>
 #include <libpdb/process.hpp>
+#include <libpdb/types.hpp>
 
+#include <sys/personality.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -65,6 +67,7 @@ std::unique_ptr<Process> Process::launch(std::filesystem::path path, bool debug,
     }
 
     if(pid == 0) {
+        personality(ADDR_NO_RANDOMIZE);
         channel.closeRead();
         if(stdoutReplacement) {
             if(dup2(*stdoutReplacement, STDOUT_FILENO) < 0) {
@@ -113,7 +116,21 @@ std::unique_ptr<Process> Process::attach(pid_t pid)
 
 void Process::resume()
 {
-    if(ptrace(PTRACE_CONT, m_pid, nullptr, nullptr)) {
+    auto pc = getProgramCounter();
+    if(breakpointSites().enabledStoppointAtAddress(pc)) {
+        auto &bp = m_breakpointSites.getByAddress(pc);
+        bp.disable();
+        if(ptrace(PTRACE_SINGLESTEP, m_pid, nullptr, nullptr) < 0) {
+            Error::sendErrno("Failed to single step");
+        }
+        int waitStatus;
+        if(waitpid(m_pid, &waitStatus, 0) < 0) {
+            Error::sendErrno("waitpid failed");
+        }
+        bp.enable();
+    }
+
+    if(ptrace(PTRACE_CONT, m_pid, nullptr, nullptr) < 0) {
         Error::sendErrno("ptrace CONT failed");
     }
     m_state = ProcessState::Running;
@@ -131,6 +148,11 @@ StopReason Process::waitOnSignal()
 
     if(m_isAttached && m_state == ProcessState::Stopped) {
         readAllRegisters();
+        auto instructionBegin = getProgramCounter();
+        instructionBegin -= 1;
+        if(reason.info == SIGTRAP && breakpointSites().enabledStoppointAtAddress(instructionBegin)) {
+            setProgramCounter(instructionBegin);
+        }
     }
 
     return reason;

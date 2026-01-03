@@ -60,6 +60,9 @@ public:
     {
         return VirtAddr{getRegisters().readByIdAs<uint64_t>(RegisterId::rip)};
     }
+    void setProgramCounter(VirtAddr address) {
+        getRegisters().writeById(RegisterId::rip, address.addr());
+    }
 
     BreakpointSite& createBreakpointSite(VirtAddr address);
 
