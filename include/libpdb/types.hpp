@@ -24,12 +24,12 @@ public:
 
     VirtAddr operator+(int64_t offset) const { return VirtAddr(m_addr + offset); }
     VirtAddr operator-(int64_t offset) const { return VirtAddr(m_addr - offset); }
-    VirtAddr operator+=(int64_t offset)
+    VirtAddr& operator+=(int64_t offset)
     {
         m_addr += offset;
         return *this;
     }
-    VirtAddr operator-(int64_t offset)
+    VirtAddr& operator-=(int64_t offset)
     {
         m_addr -= offset;
         return *this;
