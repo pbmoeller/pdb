@@ -29,7 +29,7 @@ std::unique_ptr<pdb::Process> attach(int argc, char** argv)
 
     // Passing program name
     auto programPath = argv[1];
-    auto proc = pdb::Process::launch(programPath);
+    auto proc        = pdb::Process::launch(programPath);
     std::cout << "Launched process with PID " << proc->pid() << '\n';
     return proc;
 }
@@ -77,6 +77,7 @@ std::string formatHexJoin(std::string_view format, const R& r)
     out << "]";
     return out.str();
 }
+} // namespace
 
 void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
 {
@@ -107,6 +108,7 @@ void printHelp(const std::vector<std::string>& args)
     breakpoint  - Commands for operating on breakpoints
     continue    - Resume the process
     register    - Commands for operating on registers
+    step        - Step over a single instruction
 )";
     } else if(isPrefix(args[1], "register")) {
         std::cerr << R"(Available commands
@@ -299,10 +301,14 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
         handleRegisterCommand(*process, args);
     } else if(isPrefix(command, "breakpoint")) {
         handleBreakpointCommand(*process, args);
+    } else if(isPrefix(command, "step")) {
+        auto reason = process->stepInstruction();
+        printStopReason(*process, reason);
     } else {
-        std::cerr << "Unknown command: " << command << "\n";
+        {
+            std::cerr << "Unknown command: " << command << "\n";
+        }
     }
-}
 
 } // namespace
 

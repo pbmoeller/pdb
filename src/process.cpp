@@ -179,6 +179,27 @@ void Process::writeGprs(const user_regs_struct& gprs)
     }
 }
 
+StopReason Process::stepInstruction()
+{
+    std::optional<BreakpointSite*> toReenable;
+    auto pc = getProgramCounter();
+    if(m_breakpointSites.enabledStoppointAtAddress(pc)) {
+        auto &bp = m_breakpointSites.getByAddress(pc);
+        bp.disable();
+        toReenable = &bp;
+    }
+
+    if(ptrace(PTRACE_SINGLESTEP, m_pid, nullptr, nullptr) < 0) {
+        Error::sendErrno("Could not single step");
+    }
+    auto reason = waitOnSignal();
+
+    if(toReenable) {
+        toReenable.value()->enable();
+    }
+    return reason;
+}
+
 BreakpointSite& Process::createBreakpointSite(VirtAddr address)
 {
     if(m_breakpointSites.containsAddress(address)) {

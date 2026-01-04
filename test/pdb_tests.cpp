@@ -6,11 +6,13 @@
 
 #include <catch2/catch_test_macros.hpp>
 
+#include <elf.h>
 #include <signal.h>
 #include <sys/types.h>
 
 #include <fstream>
 #include <string>
+#include <regex>
 
 namespace {
 
@@ -28,6 +30,61 @@ char getProcessStatus(pid_t pid)
     auto indexOfLastParenthesis = data.rfind(')');
     auto indexOfStatusIndicator = indexOfLastParenthesis + 2;
     return data[indexOfStatusIndicator];
+}
+
+int64_t getSectionLoadBias(std::filesystem::path path, Elf64_Addr fileAddress)
+{
+    auto command = std::string("readelf -WS ") + path.string();
+    auto pipe = popen(command.c_str(), "r");
+
+    std::regex textRegex(R"(PROGBITS\s+(\w+)\s+(\w+)\s+(\w+))");
+    char *line = nullptr;
+    size_t len = 0;
+    while(getline(&line, &len, pipe) != -1) {
+        std::cmatch groups;
+        if(std::regex_search(line, groups, textRegex)) {
+            auto address = std::stol(groups[1], nullptr, 16);
+            auto offset = std::stol(groups[2], nullptr, 16);
+            auto size = std::stol(groups[3], nullptr, 16);
+            if(address <= fileAddress && fileAddress < (address + size)) {
+                free(line);
+                pclose(pipe);
+                return address - offset;
+            }
+        }
+        free(line);
+        line = nullptr;
+    }
+    pclose(pipe);
+    pdb::Error::send("Could not find section load bias");
+}
+
+int64_t getEntryPointOffset(std::filesystem::path path)
+{
+    std::ifstream elfFile(path);
+    Elf64_Ehdr header;
+    elfFile.read(reinterpret_cast<char*>(&header), sizeof(header));
+    auto entryFileAddress = header.e_entry;
+    return entryFileAddress - getSectionLoadBias(path, entryFileAddress);
+}
+
+pdb::VirtAddr getLoadAddress(pid_t pid, int64_t offset)
+{
+    std::ifstream maps("/proc/" + std::to_string(pid) + "/maps");
+    std::regex mapRegex(R"((\w+)-\w+ ..(.). (\w+))");
+
+    std::string data;
+    while(std::getline(maps, data)) {
+        std::smatch groups;
+        std::regex_search(data, groups, mapRegex);
+
+        if(groups[2] == 'x') {
+            auto lowRange = std::stol(groups[1], nullptr, 16);
+            auto fileOffset = std::stol(groups[3], nullptr, 16);
+            return pdb::VirtAddr(offset - fileOffset + lowRange);
+        }
+    }
+    pdb::Error::send("Could not find load address");
 }
 
 } // namespace
@@ -262,4 +319,46 @@ TEST_CASE("Can iterate BreakpointSite", "[breakpoint]")
         [addr = 42](auto& site) mutable { REQUIRE(site.address().addr() == addr++); });
     cproc->breakpointSites().forEach(
         [addr = 42](auto& site) mutable { REQUIRE(site.address().addr() == addr++); });
+}
+
+TEST_CASE("Breakpoint on address works", "[breakpoint]")
+{
+    bool closeOnExec = false;
+    pdb::Pipe channel(closeOnExec);
+
+    auto proc = pdb::Process::launch("targets/hello_pdb", true, channel.getWrite());
+    channel.closeWrite();
+
+    auto offset = getEntryPointOffset("targets/hello_pdb");
+    auto loadAddress = getLoadAddress(proc->pid(), offset);
+
+    proc->createBreakpointSite(loadAddress).enable();
+    proc->resume();
+    auto reason = proc->waitOnSignal();
+
+    REQUIRE(reason.reason == pdb::ProcessState::Stopped);
+    REQUIRE(reason.info == SIGTRAP);
+    REQUIRE(proc->getProgramCounter() == loadAddress);
+
+    proc->resume();
+    reason = proc->waitOnSignal();
+
+    REQUIRE(reason.reason == pdb::ProcessState::Exited);
+    REQUIRE(reason.info == 0);
+
+    auto data = channel.read();
+    REQUIRE(pdb::toStringView(data) == "Hello world!\n");
+}
+
+TEST_CASE("Can remove BreakpointSite", "[breakpoint]")
+{
+    auto proc = pdb::Process::launch("targets/run_endlessly");
+
+    auto &site = proc->createBreakpointSite(pdb::VirtAddr{42});
+    proc->createBreakpointSite(pdb::VirtAddr{43});
+    REQUIRE(proc->breakpointSites().size() == 2);
+
+    proc->breakpointSites().removeById(site.id());
+    proc->breakpointSites().removeByAddress(pdb::VirtAddr{43});
+    REQUIRE(proc->breakpointSites().empty());
 }

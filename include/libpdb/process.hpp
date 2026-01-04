@@ -64,6 +64,8 @@ public:
         getRegisters().writeById(RegisterId::rip, address.addr());
     }
 
+    StopReason stepInstruction();
+
     BreakpointSite& createBreakpointSite(VirtAddr address);
 
     StoppointCollection<BreakpointSite>& breakpointSites() { return m_breakpointSites; }
