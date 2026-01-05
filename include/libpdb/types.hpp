@@ -4,6 +4,7 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <vector>
 
 namespace pdb {
 
@@ -17,8 +18,6 @@ public:
     explicit VirtAddr(uint64_t addr)
         : m_addr(addr)
     { }
-
-    operator uint64_t() const { return m_addr; }
 
     uint64_t addr() const { return m_addr; }
 
@@ -43,6 +42,35 @@ public:
 
 private:
     uint64_t m_addr{0};
+};
+
+template<typename T>
+class Span
+{
+public:
+    Span() = default;
+    Span(T* data, size_t size)
+        : m_data{data}
+        , m_size{size}
+    { }
+    Span(T* data, T* end)
+        : m_data{data}
+        , m_size{end - data}
+    { }
+    template<typename U>
+    Span(const std::vector<U>& vec)
+        : m_data{vec.data()}
+        , m_size{vec.size()}
+    { }
+
+    T* begin() const { return m_data; }
+    T* end() const { return m_data + m_size; }
+    size_t size() const { return m_size; }
+    T& operator[](size_t n) { return *(m_data + n); }
+
+private:
+    T* m_data{nullptr};
+    size_t m_size{0};
 };
 
 } // namespace pdb
