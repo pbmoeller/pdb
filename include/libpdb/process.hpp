@@ -1,6 +1,7 @@
 #ifndef LIBPDB_PROCESS_HPP
 #define LIBPDB_PROCESS_HPP
 
+#include <libpdb/bit.hpp>
 #include <libpdb/breakpoint_site.hpp>
 #include <libpdb/registers.hpp>
 #include <libpdb/stoppoint_collection.hpp>
@@ -70,6 +71,15 @@ public:
 
     StoppointCollection<BreakpointSite>& breakpointSites() { return m_breakpointSites; }
     const StoppointCollection<BreakpointSite>& breakpointSites() const { return m_breakpointSites; }
+
+    std::vector<std::byte> readMemory(VirtAddr address, size_t amount) const;
+    void writeMemory(VirtAddr address, Span<const std::byte> data);
+
+    template<typename T>
+    T readMemoryAs(VirtAddr address) const {
+        auto data = readMemory(address, sizeof(T));
+        return fromBytes<T>(data.data());
+    }
 
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);

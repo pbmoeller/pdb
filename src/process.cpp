@@ -1,3 +1,4 @@
+#include <libpdb/bit.hpp>
 #include <libpdb/error.hpp>
 #include <libpdb/pipe.hpp>
 #include <libpdb/process.hpp>
@@ -6,6 +7,7 @@
 #include <sys/personality.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
+#include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
 
@@ -118,7 +120,7 @@ void Process::resume()
 {
     auto pc = getProgramCounter();
     if(breakpointSites().enabledStoppointAtAddress(pc)) {
-        auto &bp = m_breakpointSites.getByAddress(pc);
+        auto& bp = m_breakpointSites.getByAddress(pc);
         bp.disable();
         if(ptrace(PTRACE_SINGLESTEP, m_pid, nullptr, nullptr) < 0) {
             Error::sendErrno("Failed to single step");
@@ -150,7 +152,8 @@ StopReason Process::waitOnSignal()
         readAllRegisters();
         auto instructionBegin = getProgramCounter();
         instructionBegin -= 1;
-        if(reason.info == SIGTRAP && breakpointSites().enabledStoppointAtAddress(instructionBegin)) {
+        if(reason.info == SIGTRAP
+           && breakpointSites().enabledStoppointAtAddress(instructionBegin)) {
             setProgramCounter(instructionBegin);
         }
     }
@@ -184,7 +187,7 @@ StopReason Process::stepInstruction()
     std::optional<BreakpointSite*> toReenable;
     auto pc = getProgramCounter();
     if(m_breakpointSites.enabledStoppointAtAddress(pc)) {
-        auto &bp = m_breakpointSites.getByAddress(pc);
+        auto& bp = m_breakpointSites.getByAddress(pc);
         bp.disable();
         toReenable = &bp;
     }
@@ -207,6 +210,46 @@ BreakpointSite& Process::createBreakpointSite(VirtAddr address)
     }
     return m_breakpointSites.push(
         std::unique_ptr<BreakpointSite>(new BreakpointSite(*this, address)));
+}
+
+std::vector<std::byte> Process::readMemory(VirtAddr address, size_t amount) const
+{
+    std::vector<std::byte> ret(amount);
+
+    iovec localDesc{ret.data(), ret.size()};
+    std::vector<iovec> remoteDescs;
+    while(amount > 0) {
+        auto upToNextPage = 0x1000 - (address.addr() & 0xFFF);
+        auto chunkSize    = std::min(amount, upToNextPage);
+        remoteDescs.push_back({reinterpret_cast<void*>(address.addr()), chunkSize});
+        amount -= chunkSize;
+        address += chunkSize;
+    }
+    if(process_vm_readv(m_pid, &localDesc, 1, remoteDescs.data(), remoteDescs.size(), 0) < 0) {
+        Error::sendErrno("Could not read process memory");
+    }
+    return ret;
+}
+
+void Process::writeMemory(VirtAddr address, Span<const std::byte> data)
+{
+    size_t written = 0;
+    while(written < data.size()) {
+        auto remaining = data.size() - written;
+        uint64_t word;
+        if(remaining >= 8) {
+            word = fromBytes<uint64_t>(data.begin() + written);
+        } else {
+            auto read     = readMemory(address + written, 8);
+            auto wordData = reinterpret_cast<char*>(&word);
+            std::memcpy(wordData, data.begin() + written, remaining);
+            std::memcpy(wordData + remaining, read.data() + remaining, 8 - remaining);
+        }
+        if(ptrace(PTRACE_POKEDATA, m_pid, address + written, word) < 0) {
+            Error::sendErrno("Failed to write memory");
+        }
+        written += 8;
+    }
 }
 
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)
