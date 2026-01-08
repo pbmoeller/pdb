@@ -1,4 +1,5 @@
 #include <libpdb/breakpoint_site.hpp>
+#include <libpdb/disassembler.hpp>
 #include <libpdb/error.hpp>
 #include <libpdb/parse.hpp>
 #include <libpdb/process.hpp>
@@ -32,6 +33,15 @@ std::unique_ptr<pdb::Process> attach(int argc, char** argv)
     auto proc        = pdb::Process::launch(programPath);
     std::cout << "Launched process with PID " << proc->pid() << '\n';
     return proc;
+}
+
+void printDisassembly(pdb::Process& process, pdb::VirtAddr address, size_t instructionCount)
+{
+    pdb::Disassembler dis(process);
+    auto instructions = dis.disassemble(instructionCount, address);
+    for(auto& inst : instructions) {
+        std::cout << std::format("{:#018x}: {}\n", inst.address.addr(), inst.text);
+    }
 }
 
 std::vector<std::string> split(std::string_view str, char delimiter)
@@ -102,12 +112,21 @@ void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
     std::cout << std::format("Process {} {}", process.pid(), message) << std::endl;
 }
 
+void handleStop(pdb::Process& process, pdb::StopReason reason)
+{
+    printStopReason(process, reason);
+    if(reason.reason == pdb::ProcessState::Stopped) {
+        printDisassembly(process, process.getProgramCounter(), 5);
+    }
+}
+
 void printHelp(const std::vector<std::string>& args)
 {
     if(args.size() == 1) {
         std::cerr << R"(Available commands
     breakpoint  - Commands for operating on breakpoints
     continue    - Resume the process
+    disassemble - Disassemble machine code to assembly
     memory      - Operations on memory
     register    - Commands for operating on registers
     step        - Step over a single instruction
@@ -132,6 +151,11 @@ void printHelp(const std::vector<std::string>& args)
     read <address>
     read <address> <number of bytes>
     write <address> <bytes>
+)";
+    } else if(isPrefix(args[1], "disassemble")) {
+        std::cerr << R"(Available commands
+    -c <number of instructions>
+    -a <start address>
 )";
     } else {
         std::cerr << "No help available on that\n";
@@ -353,6 +377,35 @@ void handleMemoryCommand(pdb::Process& process, const std::vector<std::string>& 
     }
 }
 
+void handleDisassembleCommand(pdb::Process& process, const std::vector<std::string>& args)
+{
+    auto address            = process.getProgramCounter();
+    size_t instructionCount = 5;
+
+    auto it = args.begin() + 1;
+    while(it != args.end()) {
+        if(*it == "-a" && it + 1 != args.end()) {
+            ++it;
+            auto optAddr = pdb::toIntegral<uint64_t>(*it++, 16);
+            if(!optAddr) {
+                pdb::Error::send("Invalid address format");
+            }
+            address = pdb::VirtAddr{*optAddr};
+        } else if(*it == "-c" && it + 1 != args.end()) {
+            ++it;
+            auto optN = pdb::toIntegral<size_t>(*it++);
+            if(!optN) {
+                pdb::Error::send("Invalid isntruction count");
+            }
+            instructionCount = *optN;
+        } else {
+            printHelp({"help", "disassemble"});
+            return;
+        }
+    }
+    printDisassembly(process, address, instructionCount);
+}
+
 void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line)
 {
     auto args    = split(line, ' ');
@@ -361,7 +414,7 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
     if(isPrefix(command, "continue")) {
         process->resume();
         auto reason = process->waitOnSignal();
-        printStopReason(*process, reason);
+        handleStop(*process, reason);
     } else if(isPrefix(command, "help")) {
         printHelp(args);
     } else if(isPrefix(command, "register")) {
@@ -370,16 +423,15 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
         handleBreakpointCommand(*process, args);
     } else if(isPrefix(command, "step")) {
         auto reason = process->stepInstruction();
-        printStopReason(*process, reason);
+        handleStop(*process, reason);
     } else if(isPrefix(command, "memory")) {
         handleMemoryCommand(*process, args);
+    } else if(isPrefix(command, "disassemble")) {
+        handleDisassembleCommand(*process, args);
     } else {
-        {
-            std::cerr << "Unknown command: " << command << "\n";
-        }
+        std::cerr << "Unknown command: " << command << "\n";
     }
-
-} // namespace
+}
 
 void mainLoop(std::unique_ptr<pdb::Process>& process)
 {

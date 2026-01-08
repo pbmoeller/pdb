@@ -73,6 +73,7 @@ public:
     const StoppointCollection<BreakpointSite>& breakpointSites() const { return m_breakpointSites; }
 
     std::vector<std::byte> readMemory(VirtAddr address, size_t amount) const;
+    std::vector<std::byte> readMemoryWithoutTraps(VirtAddr address, size_t amount) const;
     void writeMemory(VirtAddr address, Span<const std::byte> data);
 
     template<typename T>

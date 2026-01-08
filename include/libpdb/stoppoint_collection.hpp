@@ -29,6 +29,8 @@ public:
     Stoppoint& getByAddress(VirtAddr address);
     const Stoppoint& getByAddress(VirtAddr address) const;
 
+    std::vector<Stoppoint*> getInRegion(VirtAddr low, VirtAddr high) const;
+
     void removeById(typename Stoppoint::IdType id);
     void removeByAddress(VirtAddr address);
 
@@ -104,14 +106,29 @@ auto StoppointCollection<Stoppoint>::getByAddress(VirtAddr address) const -> con
 }
 
 template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::removeById(typename Stoppoint::IdType id) -> void {
+auto StoppointCollection<Stoppoint>::getInRegion(VirtAddr low, VirtAddr high) const
+    -> std::vector<Stoppoint*>
+{
+    std::vector<Stoppoint*> ret;
+    for(auto& site : m_stoppoints) {
+        if(site->inRange(low, high)) {
+            ret.push_back(&*site);
+        }
+    }
+    return ret;
+}
+
+template<typename Stoppoint>
+auto StoppointCollection<Stoppoint>::removeById(typename Stoppoint::IdType id) -> void
+{
     auto it = findById(id);
     (**it).disable();
     m_stoppoints.erase(it);
 }
 
 template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::removeByAddress(VirtAddr address) -> void {
+auto StoppointCollection<Stoppoint>::removeByAddress(VirtAddr address) -> void
+{
     auto it = findByAddress(address);
     (**it).disable();
     m_stoppoints.erase(it);
@@ -119,16 +136,18 @@ auto StoppointCollection<Stoppoint>::removeByAddress(VirtAddr address) -> void {
 
 template<typename Stoppoint>
 template<typename Function>
-auto StoppointCollection<Stoppoint>::forEach(Function f) -> void {
-    for(auto &point : m_stoppoints) {
+auto StoppointCollection<Stoppoint>::forEach(Function f) -> void
+{
+    for(auto& point : m_stoppoints) {
         f(*point);
     }
 }
 
 template<typename Stoppoint>
 template<typename Function>
-auto StoppointCollection<Stoppoint>::forEach(Function f) const -> void {
-    for(const auto &point : m_stoppoints) {
+auto StoppointCollection<Stoppoint>::forEach(Function f) const -> void
+{
+    for(const auto& point : m_stoppoints) {
         f(*point);
     }
 }

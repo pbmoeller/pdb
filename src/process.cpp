@@ -231,6 +231,20 @@ std::vector<std::byte> Process::readMemory(VirtAddr address, size_t amount) cons
     return ret;
 }
 
+std::vector<std::byte> Process::readMemoryWithoutTraps(VirtAddr address, size_t amount) const
+{
+    auto memory = readMemory(address, amount);
+    auto sites = m_breakpointSites.getInRegion(address, address + amount);
+    for(auto site : sites) {
+        if(!site->isEnabled()) {
+            continue;
+        }
+        auto offset = site->address() - address.addr();
+        memory[offset.addr()] = site->m_savedData;
+    }
+    return memory;
+}
+
 void Process::writeMemory(VirtAddr address, Span<const std::byte> data)
 {
     size_t written = 0;

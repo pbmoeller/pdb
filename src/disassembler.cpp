@@ -18,7 +18,7 @@ std::vector<Disassembler::Instruction> Disassembler::disassemble(size_t instruct
         address.emplace(m_process->getProgramCounter());
     }
 
-    auto code = m_process->readMemory(*address, instructions * 15);
+    auto code = m_process->readMemoryWithoutTraps(*address, instructions * 15);
 
     ZyanUSize offset = 0;
     ZydisDisassembledInstruction instr;
