@@ -1,6 +1,7 @@
 set(LIBPDB_HEADERS
     "${CMAKE_SOURCE_DIR}/include/libpdb/bit.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/breakpoint_site.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/disassembler.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/error.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/parse.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/pipe.hpp"
@@ -14,6 +15,7 @@ set(LIBPDB_HEADERS
 
 set(LIBPDB_SOURCES
     "breakpoint_site.cpp"
+    "disassembler.cpp"
     "pipe.cpp"
     "process.cpp"
     "registers.cpp"
@@ -25,6 +27,11 @@ add_library(pdb::libpdb ALIAS libpdb)
 target_sources(libpdb
     PRIVATE
         ${LIBPDB_SOURCES}
+)
+
+target_link_libraries(libpdb
+    PRIVATE
+        Zydis::Zydis
 )
 
 target_sources(libpdb

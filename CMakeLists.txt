@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 find_package(PkgConfig REQUIRED)
 pkg_check_modules(libedit REQUIRED IMPORTED_TARGET libedit)
+find_package(zydis CONFIG REQUIRED)
 
 add_subdirectory("src")
 add_subdirectory("tools")
