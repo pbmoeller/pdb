@@ -81,6 +81,34 @@ auto parseVector(std::string_view sv)
     return bytes;
 }
 
+inline auto parseVector(std::string_view text)
+{
+    auto invalid = [] {Error::sendErrno("Invalid format"); };
+
+    std::vector<std::byte> bytes;
+    const char * c = text.data();
+
+    if(*c++ != '[') {
+        invalid();
+    }
+    while(*c != ']') {
+        auto byte = toIntegral<std::byte>({c, 4}, 16);
+        bytes.push_back(byte.value());
+        c += 4;
+
+        if(*c == ',') {
+            ++c;
+        } else if(*c != ']') {
+            invalid();
+        }
+    }
+
+    if(++c != text.end()) {
+        invalid();
+    }
+    return bytes;
+}
+
 } // namespace pdb
 
 #endif // PDB_PARSE_HPP
