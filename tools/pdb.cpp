@@ -77,6 +77,7 @@ std::string formatHexJoin(std::string_view format, const R& r)
     out << "]";
     return out.str();
 }
+
 } // namespace
 
 void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
@@ -107,6 +108,7 @@ void printHelp(const std::vector<std::string>& args)
         std::cerr << R"(Available commands
     breakpoint  - Commands for operating on breakpoints
     continue    - Resume the process
+    memory      - Operations on memory
     register    - Commands for operating on registers
     step        - Step over a single instruction
 )";
@@ -124,6 +126,12 @@ void printHelp(const std::vector<std::string>& args)
     disable <id>
     enable <id>
     set <address>
+)";
+    } else if(isPrefix(args[1], "memory")) {
+        std::cerr << R"(Available commands
+    read <address>
+    read <address> <number of bytes>
+    write <address> <bytes>
 )";
     } else {
         std::cerr << "No help available on that\n";
@@ -286,6 +294,65 @@ void handleBreakpointCommand(pdb::Process& process, const std::vector<std::strin
     }
 }
 
+void handleMemoryReadCommand(pdb::Process& process, const std::vector<std::string>& args)
+{
+    auto address = pdb::toIntegral<uint64_t>(args[2], 16);
+    if(!address) {
+        pdb::Error::send("Invalid address format");
+    }
+
+    auto nBytes = 32;
+    if(args.size() == 4) {
+        auto bytesArg = pdb::toIntegral<size_t>(args[3]);
+        if(!bytesArg) {
+            pdb::Error::send("invalid number of bytes");
+        }
+        nBytes = *bytesArg;
+    }
+
+    auto data = process.readMemory(pdb::VirtAddr{*address}, nBytes);
+
+    for(size_t i = 0; i < data.size(); i += 16) {
+        auto start = data.begin() + i;
+        auto end   = data.begin() + std::min(i + 16, data.size());
+
+        auto line = formatHexJoin("{:02x}", std::ranges::subrange(start, end));
+        std::cout << std::format("{:#016x}: {}\n", *address + i, line);
+    }
+}
+
+void handleMemoryWriteCommand(pdb::Process& process, const std::vector<std::string>& args)
+{
+    if(args.size() != 4) {
+        printHelp({"help", "memory"});
+        return;
+    }
+
+    auto address = pdb::toIntegral<uint64_t>(args[2], 16);
+    if(!address) {
+        pdb::Error::send("invalid address format");
+    }
+
+    auto data = pdb::parseVector(args[3]);
+    process.writeMemory(pdb::VirtAddr{*address}, {data.data(), data.size()});
+}
+
+void handleMemoryCommand(pdb::Process& process, const std::vector<std::string>& args)
+{
+    if(args.size() < 3) {
+        printHelp({"help", "memory"});
+        return;
+    }
+    if(isPrefix(args[1], "read")) {
+        handleMemoryReadCommand(process, args);
+    } else if(isPrefix(args[1], "write")) {
+        handleMemoryWriteCommand(process, args);
+
+    } else {
+        printHelp({"help", "memory"});
+    }
+}
+
 void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line)
 {
     auto args    = split(line, ' ');
@@ -304,6 +371,8 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
     } else if(isPrefix(command, "step")) {
         auto reason = process->stepInstruction();
         printStopReason(*process, reason);
+    } else if(isPrefix(command, "memory")) {
+        handleMemoryCommand(*process, args);
     } else {
         {
             std::cerr << "Unknown command: " << command << "\n";

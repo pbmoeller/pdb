@@ -362,3 +362,31 @@ TEST_CASE("Can remove BreakpointSite", "[breakpoint]")
     proc->breakpointSites().removeByAddress(pdb::VirtAddr{43});
     REQUIRE(proc->breakpointSites().empty());
 }
+
+TEST_CASE("Reading and writing memory works", "[memory]")
+{
+    bool closeOnExec = false;
+    pdb::Pipe channel(closeOnExec);
+    auto proc = pdb::Process::launch("targets/memory", true, channel.getWrite());
+    channel.closeWrite();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto aPointer = pdb::fromBytes<uint64_t>(channel.read().data());
+    auto dataVec = proc->readMemory(pdb::VirtAddr{aPointer}, 8);
+    auto data = pdb::fromBytes<uint64_t>(dataVec.data());
+    REQUIRE(data == 0xcafecafe);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto bPointer = pdb::fromBytes<uint64_t>(channel.read().data());
+    proc->writeMemory(pdb::VirtAddr{bPointer}, {pdb::asBytes("Hello, pdb!"), 12});
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto read = channel.read();
+    REQUIRE(pdb::toStringView(read) == "Hello, pdb!");
+}
