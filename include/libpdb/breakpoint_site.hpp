@@ -32,9 +32,13 @@ public:
         return low <= m_address && high >= m_address;
     }
 
+    bool isHardware() { return m_isHardware; }
+    bool isInternal() { return m_isInternal; }
+
 private:
     friend Process;
-    BreakpointSite(Process& process, VirtAddr address);
+    BreakpointSite(Process& process, VirtAddr address, bool isHardware = false,
+                   bool isInternal = false);
 
 private:
     IdType m_id;
@@ -42,6 +46,9 @@ private:
     VirtAddr m_address;
     bool m_isEnabled;
     std::byte m_savedData;
+    bool m_isHardware;
+    bool m_isInternal;
+    int m_hardwareRegisterIndex{-1};
 };
 
 } // namespace pdb

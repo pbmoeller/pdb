@@ -145,6 +145,7 @@ void printHelp(const std::vector<std::string>& args)
     disable <id>
     enable <id>
     set <address>
+    set <address> - h
 )";
     } else if(isPrefix(args[1], "memory")) {
         std::cerr << R"(Available commands
@@ -278,6 +279,9 @@ void handleBreakpointCommand(pdb::Process& process, const std::vector<std::strin
         } else {
             std::cout << "Current breakpoints:\n";
             process.breakpointSites().forEach([](auto& site) {
+                if(site.isInternal()) {
+                    return;
+                }
                 std::cout << std::format("{}: address = {:#x}, {}\n", site.id(),
                                          site.address().addr(),
                                          site.isEnabled() ? "enabled" : "disabled");
@@ -299,7 +303,16 @@ void handleBreakpointCommand(pdb::Process& process, const std::vector<std::strin
             return;
         }
 
-        process.createBreakpointSite(pdb::VirtAddr{*address}).enable();
+        bool hardware = false;
+        if(args.size() == 4) {
+            if(args[3] == "-h") {
+                hardware = true;
+            } else {
+                pdb::Error::send("Invalid breakpoint command argument");
+            }
+        }
+
+        process.createBreakpointSite(pdb::VirtAddr{*address}, hardware).enable();
         return;
     }
 

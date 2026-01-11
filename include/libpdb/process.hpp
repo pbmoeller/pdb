@@ -61,13 +61,15 @@ public:
     {
         return VirtAddr{getRegisters().readByIdAs<uint64_t>(RegisterId::rip)};
     }
-    void setProgramCounter(VirtAddr address) {
+    void setProgramCounter(VirtAddr address)
+    {
         getRegisters().writeById(RegisterId::rip, address.addr());
     }
 
     StopReason stepInstruction();
 
-    BreakpointSite& createBreakpointSite(VirtAddr address);
+    BreakpointSite& createBreakpointSite(VirtAddr address, bool hardware = false,
+                                         bool internal = false);
 
     StoppointCollection<BreakpointSite>& breakpointSites() { return m_breakpointSites; }
     const StoppointCollection<BreakpointSite>& breakpointSites() const { return m_breakpointSites; }
@@ -77,15 +79,21 @@ public:
     void writeMemory(VirtAddr address, Span<const std::byte> data);
 
     template<typename T>
-    T readMemoryAs(VirtAddr address) const {
+    T readMemoryAs(VirtAddr address) const
+    {
         auto data = readMemory(address, sizeof(T));
         return fromBytes<T>(data.data());
     }
+
+    int setHardwareBreakpoint(BreakpointSite::IdType id, VirtAddr address);
+    void clearHardwareBreakpoint(int index);
 
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 
     void readAllRegisters();
+
+    int setHardwareStoppoint(VirtAddr address, StoppointMode mode, size_t size);
 
 private:
     pid_t m_pid{0};

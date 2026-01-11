@@ -22,6 +22,44 @@ void exitWithPerror(Pipe& channel, std::string const& prefix)
     exit(-1);
 }
 
+uint64_t encodeHardwareStoppointMode(StoppointMode mode)
+{
+    switch(mode) {
+        case pdb::StoppointMode::Write:
+            return 0b01;
+        case pdb::StoppointMode::Read:
+            return 0b11;
+        case pdb::StoppointMode::Execute:
+            return 0b00;
+        default:
+            Error::send("Invalid stoppoint mode");
+    }
+}
+
+uint64_t encodeHardwareStoppointSize(size_t size)
+{
+    switch(size) {
+        case 1:
+            return 0b00;
+        case 2:
+            return 0b01;
+        case 4:
+            return 0b11;
+        case 8:
+            return 0b10;
+        default:
+            Error::send("Invalid stoppoint size");
+    }
+}
+
+int findFreeStoppointRegister(uint64_t controlRegister)
+{
+    for(auto i = 0; i < 4; ++i) {
+        if((controlRegister & (0b11 << (i * 2))) == 0) return i;
+    }
+    Error::send("No remaining hardware debug registers");
+}
+
 } // namespace
 
 StopReason::StopReason(int waitStatus)
@@ -203,13 +241,13 @@ StopReason Process::stepInstruction()
     return reason;
 }
 
-BreakpointSite& Process::createBreakpointSite(VirtAddr address)
+BreakpointSite& Process::createBreakpointSite(VirtAddr address, bool hardware, bool internal)
 {
     if(m_breakpointSites.containsAddress(address)) {
         Error::send("Breakpoint site already created at address " + std::to_string(address.addr()));
     }
     return m_breakpointSites.push(
-        std::unique_ptr<BreakpointSite>(new BreakpointSite(*this, address)));
+        std::unique_ptr<BreakpointSite>(new BreakpointSite(*this, address, hardware, internal)));
 }
 
 std::vector<std::byte> Process::readMemory(VirtAddr address, size_t amount) const
@@ -234,12 +272,12 @@ std::vector<std::byte> Process::readMemory(VirtAddr address, size_t amount) cons
 std::vector<std::byte> Process::readMemoryWithoutTraps(VirtAddr address, size_t amount) const
 {
     auto memory = readMemory(address, amount);
-    auto sites = m_breakpointSites.getInRegion(address, address + amount);
+    auto sites  = m_breakpointSites.getInRegion(address, address + amount);
     for(auto site : sites) {
-        if(!site->isEnabled()) {
+        if(!site->isEnabled() || site->isHardware()) {
             continue;
         }
-        auto offset = site->address() - address.addr();
+        auto offset           = site->address() - address.addr();
         memory[offset.addr()] = site->m_savedData;
     }
     return memory;
@@ -264,6 +302,23 @@ void Process::writeMemory(VirtAddr address, Span<const std::byte> data)
         }
         written += 8;
     }
+}
+
+int Process::setHardwareBreakpoint(BreakpointSite::IdType id, VirtAddr address)
+{
+    return setHardwareStoppoint(address, StoppointMode::Execute, 1);
+}
+
+void Process::clearHardwareBreakpoint(int index)
+{
+    auto id = static_cast<int>(RegisterId::dr0) + index;
+    getRegisters().writeById(static_cast<RegisterId>(id), 0);
+
+    auto control = getRegisters().readByIdAs<uint64_t>(RegisterId::dr7);
+
+    auto clearMask = (0b11 << (index * 2)) | (0b1111 << (index * 4 + 16));
+    auto masked    = control & ~clearMask;
+    getRegisters().writeById(RegisterId::dr7, masked);
 }
 
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)
@@ -292,6 +347,32 @@ void Process::readAllRegisters()
         }
         getRegisters().m_data.u_debugreg[i] = data;
     }
+}
+
+int Process::setHardwareStoppoint(VirtAddr address, StoppointMode mode, size_t size)
+{
+    auto& regs   = getRegisters();
+    auto control = regs.readByIdAs<uint64_t>(RegisterId::dr7);
+
+    int freeSpace = findFreeStoppointRegister(control);
+    auto id       = static_cast<int>(RegisterId::dr0) + freeSpace;
+    regs.writeById(static_cast<RegisterId>(id), address.addr());
+
+    auto modeFlag = encodeHardwareStoppointMode(mode);
+    auto sizeFlag = encodeHardwareStoppointSize(size);
+
+    auto enableBit = (1 << (freeSpace * 2));
+    auto modeBits  = (modeFlag << (freeSpace * 4 + 16));
+    auto sizeBits  = (sizeFlag << (freeSpace * 4 + 18));
+
+    auto clearMask = (0b11 << (freeSpace * 2)) || (0b1111 << (freeSpace * 4 + 16));
+    auto masked    = control & ~clearMask;
+
+    masked |= enableBit | modeBits | sizeBits;
+
+    regs.writeById(RegisterId::dr7, masked);
+
+    return freeSpace;
 }
 
 } // namespace pdb
