@@ -10,6 +10,7 @@ set(LIBPDB_HEADERS
     "${CMAKE_SOURCE_DIR}/include/libpdb/register_info.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/stoppoint_collection.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/types.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/watchpoint.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/detail/registers.inc"
 )
 
@@ -19,6 +20,7 @@ set(LIBPDB_SOURCES
     "pipe.cpp"
     "process.cpp"
     "registers.cpp"
+    "watchpoint.cpp"
 )
 
 add_library(libpdb)

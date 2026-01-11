@@ -425,3 +425,36 @@ TEST_CASE("Hardware breakpoint evades memory checksums", "[breakpoint]")
 
     REQUIRE(pdb::toStringView(channel.read()) == "Putting mushrooms on pizza...\n");
 }
+
+TEST_CASE("Watchpoint detects read", "[watchpoint]")
+{
+    bool closeOnExec = false;
+    pdb::Pipe channel(closeOnExec);
+
+    auto proc = pdb::Process::launch("targets/anti_debugger", true, channel.getWrite());
+    channel.closeWrite();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto func = pdb::VirtAddr{pdb::fromBytes<uint64_t>(channel.read().data())};
+
+    auto &watch = proc->createWatchpoint(func, pdb::StoppointMode::ReadWrite, 1);
+    watch.enable();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    proc->stepInstruction();
+    auto &soft = proc->createBreakpointSite(func, false);
+    soft.enable();
+
+    proc->resume();
+    auto reason = proc->waitOnSignal();
+    REQUIRE(reason.info == SIGTRAP);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(pdb::toStringView(channel.read()) == "Putting mushrooms on pizza...\n");
+}

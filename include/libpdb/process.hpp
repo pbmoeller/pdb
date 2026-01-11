@@ -6,6 +6,7 @@
 #include <libpdb/registers.hpp>
 #include <libpdb/stoppoint_collection.hpp>
 #include <libpdb/types.hpp>
+#include <libpdb/watchpoint.hpp>
 
 #include <sys/types.h>
 
@@ -86,7 +87,13 @@ public:
     }
 
     int setHardwareBreakpoint(BreakpointSite::IdType id, VirtAddr address);
-    void clearHardwareBreakpoint(int index);
+    void clearHardwareStoppoint(int index);
+    int setWatchpoint(Watchpoint::IdType id, VirtAddr address, StoppointMode mode, size_t size);
+
+    Watchpoint& createWatchpoint(VirtAddr address, StoppointMode mode, size_t size);
+
+    StoppointCollection<Watchpoint>& watchpoints() { return m_watchpoints; }
+    const StoppointCollection<Watchpoint>& watchpoints() const { return m_watchpoints; }
 
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
@@ -102,6 +109,7 @@ private:
     bool m_isAttached{true};
     std::unique_ptr<Registers> m_registers;
     StoppointCollection<BreakpointSite> m_breakpointSites;
+    StoppointCollection<Watchpoint> m_watchpoints;
 };
 
 } // namespace pdb

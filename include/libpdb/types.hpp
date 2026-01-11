@@ -14,7 +14,7 @@ using byte128 = std::array<std::byte, 16>;
 enum class StoppointMode
 {
     Write,
-    Read,
+    ReadWrite,
     Execute
 };
 

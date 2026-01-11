@@ -130,6 +130,7 @@ void printHelp(const std::vector<std::string>& args)
     memory      - Operations on memory
     register    - Commands for operating on registers
     step        - Step over a single instruction
+    watchpoint  - Commands for operating on watchpoints
 )";
     } else if(isPrefix(args[1], "register")) {
         std::cerr << R"(Available commands
@@ -157,6 +158,14 @@ void printHelp(const std::vector<std::string>& args)
         std::cerr << R"(Available commands
     -c <number of instructions>
     -a <start address>
+)";
+    } else if(isPrefix(args[1], "watchpoint")) {
+        std::cerr << R"(Available commands
+    list
+    delete <id>
+    disable <id>
+    enable <id>
+    set <address> <write|rw|execute> <size>
 )";
     } else {
         std::cerr << "No help available on that\n";
@@ -419,6 +428,98 @@ void handleDisassembleCommand(pdb::Process& process, const std::vector<std::stri
     printDisassembly(process, address, instructionCount);
 }
 
+void handleWatchpointList(pdb::Process& process, const std::vector<std::string>& args)
+{
+    auto stoppointModeToString = [](auto mode) {
+        switch(mode) {
+            case pdb::StoppointMode::Execute:
+                return "Execute";
+            case pdb::StoppointMode::Write:
+                return "Write";
+            case pdb::StoppointMode::ReadWrite:
+                return "ReadWrite";
+            default:
+                pdb::Error::send("Invalid stoppoint mode");
+        }
+    };
+
+    if(process.watchpoints().empty()) {
+        std::cout << "No watchpoints set\n";
+    } else {
+        std::cout << "Current watchpoints:\n";
+        process.watchpoints().forEach([&](auto& point) {
+            std::cout << std::vformat("{}: address = {:#x}, mode = {}, size = {}, {}\n", point.id(),
+                                     point.address().addr(), stoppointModeToString(point.mode()),
+                                     point.isEnabled() ? "enabled" : "disabled");
+        });
+    }
+}
+
+void handleWatchpointSet(pdb::Process& process, const std::vector<std::string>& args)
+{
+    if(args.size() != 5) {
+        printHelp({"help", "watchpoint"});
+        return;
+    }
+    auto address  = pdb::toIntegral<uint64_t>(args[2], 16);
+    auto modeText = args[3];
+    auto size     = pdb::toIntegral<size_t>(args[4]);
+
+    if(!address || !size || !(modeText == "write" || modeText == "rw" || modeText == "execute")) {
+        printHelp({"help", "watchpoint"});
+        return;
+    }
+
+    pdb::StoppointMode mode;
+    if(modeText == "write") {
+        mode = pdb::StoppointMode::Write;
+    } else if(modeText == "rw") {
+        mode = pdb::StoppointMode::ReadWrite;
+    } else if(modeText == "execute") {
+        mode = pdb::StoppointMode::Execute;
+    }
+
+    process.createWatchpoint(pdb::VirtAddr{*address}, mode, *size).enable();
+}
+
+void handleWatchpointCommand(pdb::Process& process, const std::vector<std::string>& args)
+{
+    if(args.size() < 2) {
+        printHelp({"help", "watchpoint"});
+        return;
+    }
+
+    auto command = args[1];
+
+    if(isPrefix(command, "list")) {
+        handleWatchpointList(process, args);
+        return;
+    }
+    if(isPrefix(command, "set")) {
+        handleWatchpointSet(process, args);
+        return;
+    }
+
+    if(args.size() < 3) {
+        printHelp({"help", "watchpoint"});
+        return;
+    }
+
+    auto id = pdb::toIntegral<pdb::Watchpoint::IdType>(args[2]);
+    if(!id) {
+        std::cerr << "Command expects watchpoint id";
+        return;
+    }
+
+    if(isPrefix(command, "enable")) {
+        process.watchpoints().getById(*id).enable();
+    } else if(isPrefix(command, "disable")) {
+        process.watchpoints().getById(*id).disable();
+    } else if(isPrefix(command, "delete")) {
+        process.watchpoints().removeById(*id);
+    }
+}
+
 void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line)
 {
     auto args    = split(line, ' ');
@@ -441,6 +542,8 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
         handleMemoryCommand(*process, args);
     } else if(isPrefix(command, "disassemble")) {
         handleDisassembleCommand(*process, args);
+    } else if(isPrefix(command, "watchpoint")) {
+        handleWatchpointCommand(*process, args);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
     }

@@ -27,7 +27,7 @@ uint64_t encodeHardwareStoppointMode(StoppointMode mode)
     switch(mode) {
         case pdb::StoppointMode::Write:
             return 0b01;
-        case pdb::StoppointMode::Read:
+        case pdb::StoppointMode::ReadWrite:
             return 0b11;
         case pdb::StoppointMode::Execute:
             return 0b00;
@@ -309,7 +309,7 @@ int Process::setHardwareBreakpoint(BreakpointSite::IdType id, VirtAddr address)
     return setHardwareStoppoint(address, StoppointMode::Execute, 1);
 }
 
-void Process::clearHardwareBreakpoint(int index)
+void Process::clearHardwareStoppoint(int index)
 {
     auto id = static_cast<int>(RegisterId::dr0) + index;
     getRegisters().writeById(static_cast<RegisterId>(id), 0);
@@ -319,6 +319,19 @@ void Process::clearHardwareBreakpoint(int index)
     auto clearMask = (0b11 << (index * 2)) | (0b1111 << (index * 4 + 16));
     auto masked    = control & ~clearMask;
     getRegisters().writeById(RegisterId::dr7, masked);
+}
+
+int Process::setWatchpoint(Watchpoint::IdType id, VirtAddr address, StoppointMode mode, size_t size)
+{
+    return setHardwareStoppoint(address, mode, size);
+}
+
+Watchpoint& Process::createWatchpoint(VirtAddr address, StoppointMode mode, size_t size)
+{
+    if(m_watchpoints.containsAddress(address)) {
+        Error::send("Watchpoint already cerated at address " + std::to_string(address.addr()));
+    }
+    return m_watchpoints.push(std::unique_ptr<Watchpoint>(new Watchpoint(*this, address, mode, size)));
 }
 
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)

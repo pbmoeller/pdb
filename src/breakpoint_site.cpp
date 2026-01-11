@@ -61,7 +61,7 @@ void BreakpointSite::disable()
     }
 
     if(m_isHardware) {
-        m_process->clearHardwareBreakpoint(m_hardwareRegisterIndex);
+        m_process->clearHardwareStoppoint(m_hardwareRegisterIndex);
         m_hardwareRegisterIndex = -1;
     } else {
         errno         = 0;
