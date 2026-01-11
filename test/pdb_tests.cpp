@@ -11,8 +11,8 @@
 #include <sys/types.h>
 
 #include <fstream>
-#include <string>
 #include <regex>
+#include <string>
 
 namespace {
 
@@ -35,17 +35,17 @@ char getProcessStatus(pid_t pid)
 int64_t getSectionLoadBias(std::filesystem::path path, Elf64_Addr fileAddress)
 {
     auto command = std::string("readelf -WS ") + path.string();
-    auto pipe = popen(command.c_str(), "r");
+    auto pipe    = popen(command.c_str(), "r");
 
     std::regex textRegex(R"(PROGBITS\s+(\w+)\s+(\w+)\s+(\w+))");
-    char *line = nullptr;
+    char* line = nullptr;
     size_t len = 0;
     while(getline(&line, &len, pipe) != -1) {
         std::cmatch groups;
         if(std::regex_search(line, groups, textRegex)) {
             auto address = std::stol(groups[1], nullptr, 16);
-            auto offset = std::stol(groups[2], nullptr, 16);
-            auto size = std::stol(groups[3], nullptr, 16);
+            auto offset  = std::stol(groups[2], nullptr, 16);
+            auto size    = std::stol(groups[3], nullptr, 16);
             if(address <= fileAddress && fileAddress < (address + size)) {
                 free(line);
                 pclose(pipe);
@@ -79,7 +79,7 @@ pdb::VirtAddr getLoadAddress(pid_t pid, int64_t offset)
         std::regex_search(data, groups, mapRegex);
 
         if(groups[2] == 'x') {
-            auto lowRange = std::stol(groups[1], nullptr, 16);
+            auto lowRange   = std::stol(groups[1], nullptr, 16);
             auto fileOffset = std::stol(groups[3], nullptr, 16);
             return pdb::VirtAddr(offset - fileOffset + lowRange);
         }
@@ -329,7 +329,7 @@ TEST_CASE("Breakpoint on address works", "[breakpoint]")
     auto proc = pdb::Process::launch("targets/hello_pdb", true, channel.getWrite());
     channel.closeWrite();
 
-    auto offset = getEntryPointOffset("targets/hello_pdb");
+    auto offset      = getEntryPointOffset("targets/hello_pdb");
     auto loadAddress = getLoadAddress(proc->pid(), offset);
 
     proc->createBreakpointSite(loadAddress).enable();
@@ -354,7 +354,7 @@ TEST_CASE("Can remove BreakpointSite", "[breakpoint]")
 {
     auto proc = pdb::Process::launch("targets/run_endlessly");
 
-    auto &site = proc->createBreakpointSite(pdb::VirtAddr{42});
+    auto& site = proc->createBreakpointSite(pdb::VirtAddr{42});
     proc->createBreakpointSite(pdb::VirtAddr{43});
     REQUIRE(proc->breakpointSites().size() == 2);
 
@@ -374,8 +374,8 @@ TEST_CASE("Reading and writing memory works", "[memory]")
     proc->waitOnSignal();
 
     auto aPointer = pdb::fromBytes<uint64_t>(channel.read().data());
-    auto dataVec = proc->readMemory(pdb::VirtAddr{aPointer}, 8);
-    auto data = pdb::fromBytes<uint64_t>(dataVec.data());
+    auto dataVec  = proc->readMemory(pdb::VirtAddr{aPointer}, 8);
+    auto data     = pdb::fromBytes<uint64_t>(dataVec.data());
     REQUIRE(data == 0xcafecafe);
 
     proc->resume();
@@ -389,4 +389,39 @@ TEST_CASE("Reading and writing memory works", "[memory]")
 
     auto read = channel.read();
     REQUIRE(pdb::toStringView(read) == "Hello, pdb!");
+}
+
+TEST_CASE("Hardware breakpoint evades memory checksums", "[breakpoint]")
+{
+    bool closeOnExec = false;
+    pdb::Pipe channel(closeOnExec);
+
+    auto proc = pdb::Process::launch("targets/anti_debugger", true, channel.getWrite());
+    channel.closeWrite();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    auto func = pdb::VirtAddr{pdb::fromBytes<uint64_t>(channel.read().data())};
+    auto &soft = proc->createBreakpointSite(func, false);
+    soft.enable();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(pdb::toStringView(channel.read()) == "Putting peperoni on pizza...\n");
+
+    proc->breakpointSites().removeById(soft.id());
+    auto &hard = proc->createBreakpointSite(func, true);
+    hard.enable();
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(proc->getProgramCounter() == func);
+
+    proc->resume();
+    proc->waitOnSignal();
+
+    REQUIRE(pdb::toStringView(channel.read()) == "Putting mushrooms on pizza...\n");
 }
