@@ -2,6 +2,8 @@
 #include <libpdb/process.hpp>
 #include <libpdb/watchpoint.hpp>
 
+#include <utility>
+
 namespace pdb {
 
 namespace {
@@ -34,6 +36,14 @@ void Watchpoint::disable()
     m_isEnabled = false;
 }
 
+void Watchpoint::updateData()
+{
+    uint64_t newData{0};
+    auto read = m_process->readMemory(m_address, m_size);
+    memcpy(&newData, read.data(), m_size);
+    m_previousData = std::exchange(m_data, newData);
+}
+
 Watchpoint::Watchpoint(Process& proc, VirtAddr address, StoppointMode mode, size_t size)
     : m_process{&proc}
     , m_address{address}
@@ -46,6 +56,8 @@ Watchpoint::Watchpoint(Process& proc, VirtAddr address, StoppointMode mode, size
     }
 
     m_id = getNextId();
+
+    updateData();
 }
 
 } // namespace pdb

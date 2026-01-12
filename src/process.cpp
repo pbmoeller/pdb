@@ -107,6 +107,9 @@ std::unique_ptr<Process> Process::launch(std::filesystem::path path, bool debug,
     }
 
     if(pid == 0) {
+        if(setpgid(0, 0) < 0) {
+            exitWithPerror(channel, "Could not set pgid");
+        }
         personality(ADDR_NO_RANDOMIZE);
         channel.closeRead();
         if(stdoutReplacement) {
@@ -188,11 +191,21 @@ StopReason Process::waitOnSignal()
 
     if(m_isAttached && m_state == ProcessState::Stopped) {
         readAllRegisters();
+        augmentStopReason(reason);
         auto instructionBegin = getProgramCounter();
         instructionBegin -= 1;
-        if(reason.info == SIGTRAP
-           && breakpointSites().enabledStoppointAtAddress(instructionBegin)) {
-            setProgramCounter(instructionBegin);
+        if(reason.info == SIGTRAP) {
+            if(reason.trapReason == TrapType::SoftwareBreak
+               && m_breakpointSites.containsAddress(instructionBegin)
+               && m_breakpointSites.getByAddress(instructionBegin).isEnabled()) {
+                setProgramCounter(instructionBegin);
+            } else if(reason.trapReason == TrapType::HardwareBreak) {
+                auto id = getCurrentHardwareStoppoint();
+                if(id.index() == 1) {
+                    m_watchpoints.getById(std::get<1>(id)).updateData();
+                }
+            }
+
         }
     }
 
@@ -331,7 +344,28 @@ Watchpoint& Process::createWatchpoint(VirtAddr address, StoppointMode mode, size
     if(m_watchpoints.containsAddress(address)) {
         Error::send("Watchpoint already cerated at address " + std::to_string(address.addr()));
     }
-    return m_watchpoints.push(std::unique_ptr<Watchpoint>(new Watchpoint(*this, address, mode, size)));
+    return m_watchpoints.push(
+        std::unique_ptr<Watchpoint>(new Watchpoint(*this, address, mode, size)));
+}
+
+std::variant<BreakpointSite::IdType, Watchpoint::IdType>
+Process::getCurrentHardwareStoppoint() const
+{
+    auto& regs  = getRegisters();
+    auto status = regs.readByIdAs<uint64_t>(RegisterId::dr6);
+    auto index  = __builtin_ctzll(status);
+
+    auto id   = static_cast<int>(RegisterId::dr0) + index;
+    auto addr = VirtAddr{regs.readByIdAs<uint64_t>(static_cast<RegisterId>(id))};
+
+    using ret = std::variant<BreakpointSite::IdType, Watchpoint::IdType>;
+    if(m_breakpointSites.containsAddress(addr)) {
+        auto siteId = m_breakpointSites.getByAddress(addr).id();
+        return ret{std::in_place_index<0>, siteId};
+    } else {
+        auto watchId = m_watchpoints.getByAddress(addr).id();
+        return ret{std::in_place_index<1>, watchId};
+    }
 }
 
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)
@@ -386,6 +420,29 @@ int Process::setHardwareStoppoint(VirtAddr address, StoppointMode mode, size_t s
     regs.writeById(RegisterId::dr7, masked);
 
     return freeSpace;
+}
+
+void Process::augmentStopReason(StopReason& reason)
+{
+    siginfo_t info;
+    if(ptrace(PTRACE_GETSIGINFO, m_pid, nullptr, &info) < 0) {
+        Error::sendErrno("Failed to get signal info");
+    }
+
+    reason.trapReason = TrapType::Unknown;
+    if(reason.info == SIGTRAP) {
+        switch(info.si_code) {
+            case TRAP_TRACE:
+                reason.trapReason = TrapType::SingleStep;
+                break;
+            case SI_KERNEL:
+                reason.trapReason = TrapType::SoftwareBreak;
+                break;
+            case TRAP_HWBKPT:
+                reason.trapReason = TrapType::HardwareBreak;
+                break;
+        }
+    }
 }
 
 } // namespace pdb

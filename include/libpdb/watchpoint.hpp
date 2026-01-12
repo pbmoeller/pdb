@@ -35,6 +35,11 @@ public:
         return low <= m_address && high > m_address;
     }
 
+    uint64_t data() const { return m_data; }
+    uint64_t previousData() const { return m_previousData; }
+
+    void updateData();
+
 private:
     friend Process;
     Watchpoint(Process& proc, VirtAddr address, StoppointMode mode, size_t size);
@@ -46,6 +51,8 @@ private:
     size_t m_size;
     bool m_isEnabled;
     int hardwareRegisterIndex{-1};
+    uint64_t m_data{0};
+    uint64_t m_previousData{0};
 };
 
 } // namespace pdb

@@ -24,12 +24,20 @@ enum class ProcessState
     Terminated
 };
 
+enum class TrapType {
+    SingleStep,
+    SoftwareBreak,
+    HardwareBreak,
+    Unknown,
+};
+
 struct StopReason
 {
     StopReason(int waitStatus);
 
     ProcessState reason;
     uint8_t info;
+    std::optional<TrapType> trapReason;
 };
 
 class Process
@@ -95,12 +103,16 @@ public:
     StoppointCollection<Watchpoint>& watchpoints() { return m_watchpoints; }
     const StoppointCollection<Watchpoint>& watchpoints() const { return m_watchpoints; }
 
+    std::variant<BreakpointSite::IdType, Watchpoint::IdType> getCurrentHardwareStoppoint() const;
+
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 
     void readAllRegisters();
 
     int setHardwareStoppoint(VirtAddr address, StoppointMode mode, size_t size);
+
+    void augmentStopReason(StopReason &reason);
 
 private:
     pid_t m_pid{0};

@@ -6,6 +6,7 @@
 
 #include <editline/readline.h>
 
+#include <csignal>
 #include <unistd.h>
 
 #include <algorithm>
@@ -19,6 +20,13 @@
 #include <vector>
 
 namespace {
+
+pdb::Process* g_pdbProcess{nullptr};
+
+void handleSigint(int)
+{
+    kill(g_pdbProcess->pid(), SIGSTOP);
+}
 
 std::unique_ptr<pdb::Process> attach(int argc, char** argv)
 {
@@ -88,6 +96,38 @@ std::string formatHexJoin(std::string_view format, const R& r)
     return out.str();
 }
 
+std::string getSigtrapInfo(const pdb::Process& process, pdb::StopReason reason)
+{
+    if(reason.trapReason == pdb::TrapType::SoftwareBreak) {
+        auto& site = process.breakpointSites().getByAddress(process.getProgramCounter());
+        return std::format(" (breakpoint {})", site.id());
+    }
+    if(reason.trapReason == pdb::TrapType::HardwareBreak) {
+        auto id = process.getCurrentHardwareStoppoint();
+
+        if(id.index() == 0) {
+            return std::format(" (breakpoint {})", std::get<0>(id));
+        }
+
+        std::string message;
+        auto& point = process.watchpoints().getById(std::get<1>(id));
+        message += std::format(" (watchpoint {})", point.id());
+
+        if(point.data() == point.previousData()) {
+            message += std::format("\nValue: {:#x}", point.data());
+        } else {
+            message += std::format("\nOld value: {:#x}\nNew value: {:#x}", point.previousData(),
+                                   point.data());
+        }
+        return message;
+    }
+    if(reason.trapReason == pdb::TrapType::SingleStep) {
+        return " (single step)";
+    }
+
+    return "";
+}
+
 } // namespace
 
 void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
@@ -98,6 +138,9 @@ void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
         case pdb::ProcessState::Stopped:
             message = std::format("Stopped with signal {} at {:#x}", sigabbrev_np(reason.info),
                                   process.getProgramCounter().addr());
+            if(reason.info == SIGTRAP) {
+                message += getSigtrapInfo(process, reason);
+            }
             break;
         case pdb::ProcessState::Exited:
             message = std::format("Exited with status {}", static_cast<int>(reason.info));
@@ -448,9 +491,9 @@ void handleWatchpointList(pdb::Process& process, const std::vector<std::string>&
     } else {
         std::cout << "Current watchpoints:\n";
         process.watchpoints().forEach([&](auto& point) {
-            std::cout << std::vformat("{}: address = {:#x}, mode = {}, size = {}, {}\n", point.id(),
+            std::cout << std::format("{}: address = {:#x}, mode = {}, size = {}, {}\n", point.id(),
                                      point.address().addr(), stoppointModeToString(point.mode()),
-                                     point.isEnabled() ? "enabled" : "disabled");
+                                     point.size(), point.isEnabled() ? "enabled" : "disabled");
         });
     }
 }
@@ -585,6 +628,8 @@ int main(int argc, char** argv)
 
     try {
         auto process = attach(argc, argv);
+        g_pdbProcess = process.get();
+        signal(SIGINT, handleSigint);
         mainLoop(process);
     } catch(const pdb::Error& e) {
         std::cout << e.what() << '\n';
