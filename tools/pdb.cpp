@@ -3,6 +3,7 @@
 #include <libpdb/error.hpp>
 #include <libpdb/parse.hpp>
 #include <libpdb/process.hpp>
+#include <libpdb/syscalls.hpp>
 
 #include <editline/readline.h>
 
@@ -124,6 +125,19 @@ std::string getSigtrapInfo(const pdb::Process& process, pdb::StopReason reason)
     if(reason.trapReason == pdb::TrapType::SingleStep) {
         return " (single step)";
     }
+    if(reason.trapReason == pdb::TrapType::Syscall) {
+        const auto& info    = *reason.syscallInfo;
+        std::string message = " ";
+        if(info.entry) {
+            message += "(syscall entry)\n";
+            message += std::format("syscall: {}({})", pdb::syscallIdToName(info.id),
+                                   formatHexJoin("{:#x}", info.args));
+        } else {
+            message += "(syscall exit)\n";
+            message += std::format("syscall returned: {:#x}", info.ret);
+        }
+        return message;
+    }
 
     return "";
 }
@@ -136,12 +150,16 @@ void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
 
     switch(reason.reason) {
         case pdb::ProcessState::Stopped:
-            message = std::format("Stopped with signal {} at {:#x}", sigabbrev_np(reason.info),
-                                  process.getProgramCounter().addr());
+        {
+            auto sigName = sigabbrev_np(reason.info);
+            std::string_view sigView = sigName ? sigName : "Unknown";
+            message  = std::format("Stopped with signal {} at {:#x}", sigView,
+                                   process.getProgramCounter().addr());
             if(reason.info == SIGTRAP) {
                 message += getSigtrapInfo(process, reason);
             }
             break;
+        }
         case pdb::ProcessState::Exited:
             message = std::format("Exited with status {}", static_cast<int>(reason.info));
             break;
@@ -168,6 +186,7 @@ void printHelp(const std::vector<std::string>& args)
     if(args.size() == 1) {
         std::cerr << R"(Available commands
     breakpoint  - Commands for operating on breakpoints
+    catchpoint  - Commands for operating on catchpoints
     continue    - Resume the process
     disassemble - Disassemble machine code to assembly
     memory      - Operations on memory
@@ -209,6 +228,12 @@ void printHelp(const std::vector<std::string>& args)
     disable <id>
     enable <id>
     set <address> <write|rw|execute> <size>
+)";
+    } else if(isPrefix(args[1], "catchpoint")) {
+        std::cerr << R"(Available commands
+    syscall
+    syscall none
+    syscall <list of syscall ID's or names>
 )";
     } else {
         std::cerr << "No help available on that\n";
@@ -563,6 +588,36 @@ void handleWatchpointCommand(pdb::Process& process, const std::vector<std::strin
     }
 }
 
+void handleSyscallCatchpointCommand(pdb::Process& process, const std::vector<std::string>& args)
+{
+    pdb::SyscallCatchPolicy policy{pdb::SyscallCatchPolicy::catchAll()};
+
+    if(args.size() == 3 && args[2] == "none") {
+        policy = pdb::SyscallCatchPolicy::catchNone();
+    } else if(args.size() >= 3) {
+        auto syscalls = split(args[2], ',');
+        std::vector<int> toCatch;
+        std::transform(std::begin(syscalls), std::end(syscalls), std::back_inserter(toCatch),
+                       [](auto& syscall) {
+                           return std::isdigit(syscall[0]) ? pdb::toIntegral<int>(syscall).value()
+                                                           : pdb::syscallNameToId(syscall);
+                       });
+        policy = pdb::SyscallCatchPolicy::catchSome(std::move(toCatch));
+    }
+    process.setSyscallCatchPolicy(policy);
+}
+
+void handleCatchpointCommand(pdb::Process& process, const std::vector<std::string>& args)
+{
+    if(args.size() < 2) {
+        printHelp({"help", "catchpoint"});
+        return;
+    }
+    if(isPrefix(args[1], "syscall")) {
+        handleSyscallCatchpointCommand(process, args);
+    }
+}
+
 void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line)
 {
     auto args    = split(line, ' ');
@@ -587,6 +642,8 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
         handleDisassembleCommand(*process, args);
     } else if(isPrefix(command, "watchpoint")) {
         handleWatchpointCommand(*process, args);
+    } else if(isPrefix(command, "catchpoint")) {
+        handleCatchpointCommand(*process, args);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
     }

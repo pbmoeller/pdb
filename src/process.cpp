@@ -22,6 +22,13 @@ void exitWithPerror(Pipe& channel, std::string const& prefix)
     exit(-1);
 }
 
+void setPtraceOptions(pid_t pid)
+{
+    if(ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD) < 0) {
+        pdb::Error::sendErrno("Failed to set TRACESYSGOOD option");
+    }
+}
+
 uint64_t encodeHardwareStoppointMode(StoppointMode mode)
 {
     switch(mode) {
@@ -139,6 +146,7 @@ std::unique_ptr<Process> Process::launch(std::filesystem::path path, bool debug,
 
     if(debug) {
         proc->waitOnSignal();
+        setPtraceOptions(proc->pid());
     }
 
     return proc;
@@ -154,6 +162,7 @@ std::unique_ptr<Process> Process::attach(pid_t pid)
     }
     std::unique_ptr<Process> proc(new Process(pid, false, true));
     proc->waitOnSignal();
+    setPtraceOptions(proc->pid());
     return proc;
 }
 
@@ -173,8 +182,11 @@ void Process::resume()
         bp.enable();
     }
 
-    if(ptrace(PTRACE_CONT, m_pid, nullptr, nullptr) < 0) {
-        Error::sendErrno("ptrace CONT failed");
+    auto request = m_syscallCatchPolicy.getMode() == SyscallCatchPolicy::Mode::None
+                     ? PTRACE_CONT
+                     : PTRACE_SYSCALL;
+    if(ptrace(request, m_pid, nullptr, nullptr) < 0) {
+        Error::sendErrno("Could not resume");
     }
     m_state = ProcessState::Running;
 }
@@ -204,8 +216,9 @@ StopReason Process::waitOnSignal()
                 if(id.index() == 1) {
                     m_watchpoints.getById(std::get<1>(id)).updateData();
                 }
+            } else if(reason.trapReason == TrapType::Syscall) {
+                reason = maybeResumeFromSyscall(reason);
             }
-
         }
     }
 
@@ -368,6 +381,20 @@ Process::getCurrentHardwareStoppoint() const
     }
 }
 
+StopReason Process::maybeResumeFromSyscall(const StopReason &reason)
+{
+    if(m_syscallCatchPolicy.getMode() == SyscallCatchPolicy::Mode::Some) {
+        auto &toCatch = m_syscallCatchPolicy.getToCatch();
+        auto found = std::find(std::begin(toCatch), std::end(toCatch), reason.syscallInfo->id);
+
+        if(found == std::end(toCatch)) {
+            resume();
+            return waitOnSignal();
+        }
+    }
+    return reason;
+}
+
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)
     : m_pid(pid)
     , m_terminateOnEnd(terminateOnEnd)
@@ -428,6 +455,34 @@ void Process::augmentStopReason(StopReason& reason)
     if(ptrace(PTRACE_GETSIGINFO, m_pid, nullptr, &info) < 0) {
         Error::sendErrno("Failed to get signal info");
     }
+
+    if(reason.info == (SIGTRAP | 0x80)) {
+        auto &sysInfo = reason.syscallInfo.emplace();
+        auto &regs = getRegisters();
+
+        if(m_expectingSyscallExit) {
+            sysInfo.entry = false;
+            sysInfo.id = regs.readByIdAs<uint64_t>(RegisterId::orig_rax);
+            sysInfo.ret = regs.readByIdAs<uint64_t>(RegisterId::rax);
+            m_expectingSyscallExit = false;
+        } else {
+            sysInfo.entry = true;
+            sysInfo.id = regs.readByIdAs<uint64_t>(RegisterId::orig_rax);
+            std::array<RegisterId, 6> argRegs = {
+                RegisterId::rdi, RegisterId::rsi, RegisterId::rdx, RegisterId::r10, RegisterId::r8, RegisterId::r9
+            };
+            for(auto i = 0; i < 6; ++i) {
+                sysInfo.args[i] = regs.readByIdAs<uint64_t>(argRegs[i]);
+            }
+            m_expectingSyscallExit = true;
+        }
+
+        reason.info = SIGTRAP;
+        reason.trapReason = TrapType::Syscall;
+        return;
+    }
+
+    m_expectingSyscallExit = false;
 
     reason.trapReason = TrapType::Unknown;
     if(reason.info == SIGTRAP) {

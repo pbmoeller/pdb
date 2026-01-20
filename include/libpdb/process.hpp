@@ -24,11 +24,22 @@ enum class ProcessState
     Terminated
 };
 
-enum class TrapType {
+enum class TrapType
+{
     SingleStep,
     SoftwareBreak,
     HardwareBreak,
+    Syscall,
     Unknown,
+};
+
+struct SyscallInformation {
+    uint16_t id;
+    bool entry;
+    union {
+        std::array<uint64_t, 6> args;
+        int64_t ret;
+    };
 };
 
 struct StopReason
@@ -38,6 +49,37 @@ struct StopReason
     ProcessState reason;
     uint8_t info;
     std::optional<TrapType> trapReason;
+    std::optional<SyscallInformation> syscallInfo;
+};
+
+class SyscallCatchPolicy
+{
+public:
+    enum Mode
+    {
+        None,
+        Some,
+        All,
+    };
+
+    static SyscallCatchPolicy catchAll() { return {Mode::All, {}}; }
+    static SyscallCatchPolicy catchNone() { return {Mode::None, {}}; }
+    static SyscallCatchPolicy catchSome(std::vector<int> toCatch)
+    {
+        return {Mode::Some, std::move(toCatch)};
+    }
+
+    Mode getMode() const { return m_mode; }
+    const std::vector<int>& getToCatch() const { return m_toCatch; }
+
+private:
+    SyscallCatchPolicy(Mode mode, std::vector<int> toCatch)
+        : m_mode(mode)
+        , m_toCatch(toCatch)
+    { }
+
+    Mode m_mode{Mode::None};
+    std::vector<int> m_toCatch;
 };
 
 class Process
@@ -105,6 +147,12 @@ public:
 
     std::variant<BreakpointSite::IdType, Watchpoint::IdType> getCurrentHardwareStoppoint() const;
 
+    void setSyscallCatchPolicy(SyscallCatchPolicy info) {
+        m_syscallCatchPolicy = std::move(info);
+    }
+
+    StopReason maybeResumeFromSyscall(const StopReason &reason);
+
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 
@@ -112,7 +160,7 @@ private:
 
     int setHardwareStoppoint(VirtAddr address, StoppointMode mode, size_t size);
 
-    void augmentStopReason(StopReason &reason);
+    void augmentStopReason(StopReason& reason);
 
 private:
     pid_t m_pid{0};
@@ -122,6 +170,8 @@ private:
     std::unique_ptr<Registers> m_registers;
     StoppointCollection<BreakpointSite> m_breakpointSites;
     StoppointCollection<Watchpoint> m_watchpoints;
+    SyscallCatchPolicy m_syscallCatchPolicy{SyscallCatchPolicy::catchNone()};
+    bool m_expectingSyscallExit{false};
 };
 
 } // namespace pdb

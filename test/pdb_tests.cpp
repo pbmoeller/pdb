@@ -3,10 +3,12 @@
 #include <libpdb/pipe.hpp>
 #include <libpdb/process.hpp>
 #include <libpdb/registers.hpp>
+#include <libpdb/syscalls.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
 #include <elf.h>
+#include <fcntl.h>
 #include <signal.h>
 #include <sys/types.h>
 
@@ -402,8 +404,8 @@ TEST_CASE("Hardware breakpoint evades memory checksums", "[breakpoint]")
     proc->resume();
     proc->waitOnSignal();
 
-    auto func = pdb::VirtAddr{pdb::fromBytes<uint64_t>(channel.read().data())};
-    auto &soft = proc->createBreakpointSite(func, false);
+    auto func  = pdb::VirtAddr{pdb::fromBytes<uint64_t>(channel.read().data())};
+    auto& soft = proc->createBreakpointSite(func, false);
     soft.enable();
 
     proc->resume();
@@ -412,7 +414,7 @@ TEST_CASE("Hardware breakpoint evades memory checksums", "[breakpoint]")
     REQUIRE(pdb::toStringView(channel.read()) == "Putting peperoni on pizza...\n");
 
     proc->breakpointSites().removeById(soft.id());
-    auto &hard = proc->createBreakpointSite(func, true);
+    auto& hard = proc->createBreakpointSite(func, true);
     hard.enable();
 
     proc->resume();
@@ -439,14 +441,14 @@ TEST_CASE("Watchpoint detects read", "[watchpoint]")
 
     auto func = pdb::VirtAddr{pdb::fromBytes<uint64_t>(channel.read().data())};
 
-    auto &watch = proc->createWatchpoint(func, pdb::StoppointMode::ReadWrite, 1);
+    auto& watch = proc->createWatchpoint(func, pdb::StoppointMode::ReadWrite, 1);
     watch.enable();
 
     proc->resume();
     proc->waitOnSignal();
 
     proc->stepInstruction();
-    auto &soft = proc->createBreakpointSite(func, false);
+    auto& soft = proc->createBreakpointSite(func, false);
     soft.enable();
 
     proc->resume();
@@ -457,4 +459,42 @@ TEST_CASE("Watchpoint detects read", "[watchpoint]")
     proc->waitOnSignal();
 
     REQUIRE(pdb::toStringView(channel.read()) == "Putting mushrooms on pizza...\n");
+}
+
+TEST_CASE("Syscall mapping works", "[syscall]")
+{
+    REQUIRE(pdb::syscallIdToName(0) == "read");
+    REQUIRE(pdb::syscallNameToId("read") == 0);
+    REQUIRE(pdb::syscallIdToName(62) == "kill");
+    REQUIRE(pdb::syscallNameToId("kill") == 62);
+}
+
+TEST_CASE("Syscall catchpoint work", "[catchpoint]")
+{
+    auto devNull = open("/dev/null", O_WRONLY);
+    auto proc = pdb::Process::launch("targets/anti_debugger", true, devNull);
+
+    auto writeSyscall = pdb::syscallNameToId("write");
+    auto policy = pdb::SyscallCatchPolicy::catchSome({writeSyscall});
+    proc->setSyscallCatchPolicy(policy);
+
+    proc->resume();
+    auto reason = proc->waitOnSignal();
+
+    REQUIRE(reason.reason == pdb::ProcessState::Stopped);
+    REQUIRE(reason.info == SIGTRAP);
+    REQUIRE(reason.trapReason == pdb::TrapType::Syscall);
+    REQUIRE(reason.syscallInfo->id == writeSyscall);
+    REQUIRE(reason.syscallInfo->entry == true);
+
+    proc->resume();
+    reason = proc->waitOnSignal();
+
+    REQUIRE(reason.reason == pdb::ProcessState::Stopped);
+    REQUIRE(reason.info == SIGTRAP);
+    REQUIRE(reason.trapReason == pdb::TrapType::Syscall);
+    REQUIRE(reason.syscallInfo->id == writeSyscall);
+    REQUIRE(reason.syscallInfo->entry == false);
+
+    close(devNull);
 }
