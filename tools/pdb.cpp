@@ -4,6 +4,7 @@
 #include <libpdb/parse.hpp>
 #include <libpdb/process.hpp>
 #include <libpdb/syscalls.hpp>
+#include <libpdb/target.hpp>
 
 #include <editline/readline.h>
 
@@ -29,19 +30,19 @@ void handleSigint(int)
     kill(g_pdbProcess->pid(), SIGSTOP);
 }
 
-std::unique_ptr<pdb::Process> attach(int argc, char** argv)
+std::unique_ptr<pdb::Target> attach(int argc, char** argv)
 {
     // Passing PID
     if(argc == 3 && argv[1] == std::string_view("-p")) {
         pid_t pid = std::atoi(argv[2]);
-        return pdb::Process::attach(pid);
+        return pdb::Target::attach(pid);
     }
 
     // Passing program name
     auto programPath = argv[1];
-    auto proc        = pdb::Process::launch(programPath);
-    std::cout << "Launched process with PID " << proc->pid() << '\n';
-    return proc;
+    auto target      = pdb::Target::launch(programPath);
+    std::cout << "Launched process with PID " << target->getProcess().pid() << '\n';
+    return target;
 }
 
 void printDisassembly(pdb::Process& process, pdb::VirtAddr address, size_t instructionCount)
@@ -142,22 +143,32 @@ std::string getSigtrapInfo(const pdb::Process& process, pdb::StopReason reason)
     return "";
 }
 
+std::string getSignalStopReason(const pdb::Target& target, pdb::StopReason reason)
+{
+    auto& process       = target.getProcess();
+    std::string message = std::format("stopped with signal {} at {:#x}", sigabbrev_np(reason.info),
+                                      process.getProgramCounter().addr());
+    auto func = target.getElf().getSymbolContainingAddress(process.getProgramCounter());
+    if(func && ELF64_ST_TYPE(func.value()->st_info) == STT_FUNC) {
+        message += std::format(" ({})", target.getElf().getString(func.value()->st_name));
+    }
+
+    if(reason.info == SIGTRAP) {
+        message += getSigtrapInfo(process, reason);
+    }
+    return message;
+}
+
 } // namespace
 
-void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
+void printStopReason(const pdb::Target& target, const pdb::StopReason& reason)
 {
     std::string message;
 
     switch(reason.reason) {
         case pdb::ProcessState::Stopped:
         {
-            auto sigName = sigabbrev_np(reason.info);
-            std::string_view sigView = sigName ? sigName : "Unknown";
-            message  = std::format("Stopped with signal {} at {:#x}", sigView,
-                                   process.getProgramCounter().addr());
-            if(reason.info == SIGTRAP) {
-                message += getSigtrapInfo(process, reason);
-            }
+            message = getSignalStopReason(target, reason);
             break;
         }
         case pdb::ProcessState::Exited:
@@ -170,14 +181,14 @@ void printStopReason(const pdb::Process& process, const pdb::StopReason& reason)
             break;
     }
 
-    std::cout << std::format("Process {} {}", process.pid(), message) << std::endl;
+    std::cout << std::format("Process {} {}", target.getProcess().pid(), message) << std::endl;
 }
 
-void handleStop(pdb::Process& process, pdb::StopReason reason)
+void handleStop(pdb::Target& target, pdb::StopReason reason)
 {
-    printStopReason(process, reason);
+    printStopReason(target, reason);
     if(reason.reason == pdb::ProcessState::Stopped) {
-        printDisassembly(process, process.getProgramCounter(), 5);
+        printDisassembly(target.getProcess(), target.getProcess().getProgramCounter(), 5);
     }
 }
 
@@ -618,15 +629,16 @@ void handleCatchpointCommand(pdb::Process& process, const std::vector<std::strin
     }
 }
 
-void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line)
+void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
 {
     auto args    = split(line, ' ');
     auto command = args[0];
+    auto process = &target->getProcess();
 
     if(isPrefix(command, "continue")) {
         process->resume();
         auto reason = process->waitOnSignal();
-        handleStop(*process, reason);
+        handleStop(*target, reason);
     } else if(isPrefix(command, "help")) {
         printHelp(args);
     } else if(isPrefix(command, "register")) {
@@ -635,7 +647,7 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
         handleBreakpointCommand(*process, args);
     } else if(isPrefix(command, "step")) {
         auto reason = process->stepInstruction();
-        handleStop(*process, reason);
+        handleStop(*target, reason);
     } else if(isPrefix(command, "memory")) {
         handleMemoryCommand(*process, args);
     } else if(isPrefix(command, "disassemble")) {
@@ -649,7 +661,7 @@ void handleCommand(std::unique_ptr<pdb::Process>& process, std::string_view line
     }
 }
 
-void mainLoop(std::unique_ptr<pdb::Process>& process)
+void mainLoop(std::unique_ptr<pdb::Target>& target)
 {
     char* line = nullptr;
     while((line = readline("pdb> ")) != nullptr) {
@@ -668,7 +680,7 @@ void mainLoop(std::unique_ptr<pdb::Process>& process)
 
         if(!lineStr.empty()) {
             try {
-                handleCommand(process, lineStr);
+                handleCommand(target, lineStr);
             } catch(const pdb::Error& e) {
                 std::cerr << e.what() << "\n";
             }
@@ -684,10 +696,10 @@ int main(int argc, char** argv)
     }
 
     try {
-        auto process = attach(argc, argv);
-        g_pdbProcess = process.get();
+        auto target  = attach(argc, argv);
+        g_pdbProcess = &target->getProcess();
         signal(SIGINT, handleSigint);
-        mainLoop(process);
+        mainLoop(target);
     } catch(const pdb::Error& e) {
         std::cout << e.what() << '\n';
     }

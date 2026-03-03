@@ -1,4 +1,5 @@
 #include <libpdb/bit.hpp>
+#include <libpdb/elf.hpp>
 #include <libpdb/error.hpp>
 #include <libpdb/pipe.hpp>
 #include <libpdb/process.hpp>
@@ -497,4 +498,23 @@ TEST_CASE("Syscall catchpoint work", "[catchpoint]")
     REQUIRE(reason.syscallInfo->entry == false);
 
     close(devNull);
+}
+
+TEST_CASE("ELF parser works", "[elf]")
+{
+    auto path = "targets/hello_pdb";
+    pdb::Elf elf(path);
+    auto entry = elf.header().e_entry;
+    auto sym = elf.getSymbolAtAddress(pdb::FileAddr{elf, entry});
+    auto name = elf.getString(sym.value()->st_name);
+    REQUIRE(name == "_start");
+
+    auto syms = elf.getSymbolsByName("_start");
+    name = elf.getString(syms.at(0)->st_name);
+    REQUIRE(name == "_start");
+
+    elf.notifyLoaded(pdb::VirtAddr{0xcafecafe});
+    sym = elf.getSymbolAtAddress(pdb::VirtAddr{0xcafecafe + entry});
+    name = elf.getString(sym.value()->st_name);
+    REQUIRE(name == "_start");
 }

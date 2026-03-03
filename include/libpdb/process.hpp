@@ -13,6 +13,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 
 namespace pdb {
 
@@ -33,7 +34,8 @@ enum class TrapType
     Unknown,
 };
 
-struct SyscallInformation {
+struct SyscallInformation
+{
     uint16_t id;
     bool entry;
     union {
@@ -147,11 +149,11 @@ public:
 
     std::variant<BreakpointSite::IdType, Watchpoint::IdType> getCurrentHardwareStoppoint() const;
 
-    void setSyscallCatchPolicy(SyscallCatchPolicy info) {
-        m_syscallCatchPolicy = std::move(info);
-    }
+    void setSyscallCatchPolicy(SyscallCatchPolicy info) { m_syscallCatchPolicy = std::move(info); }
 
-    StopReason maybeResumeFromSyscall(const StopReason &reason);
+    StopReason maybeResumeFromSyscall(const StopReason& reason);
+
+    std::unordered_map<int, uint64_t> getAuxv() const;
 
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);

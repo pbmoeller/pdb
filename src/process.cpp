@@ -4,12 +4,15 @@
 #include <libpdb/process.hpp>
 #include <libpdb/types.hpp>
 
+#include <elf.h>
 #include <sys/personality.h>
 #include <sys/ptrace.h>
 #include <sys/types.h>
 #include <sys/uio.h>
 #include <sys/wait.h>
 #include <unistd.h>
+
+#include <fstream>
 
 namespace pdb {
 
@@ -498,6 +501,26 @@ void Process::augmentStopReason(StopReason& reason)
                 break;
         }
     }
+}
+
+std::unordered_map<int, uint64_t> Process::getAuxv() const
+{
+    auto path = "/proc/" + std::to_string(m_pid) + "/auxv";
+    std::ifstream auxv(path);
+
+    std::unordered_map<int, uint64_t> ret;
+    uint64_t id;
+    uint64_t value;
+
+    auto read = [&](auto&into) {
+        auxv.read(reinterpret_cast<char*>(&into), sizeof(into));
+        };
+
+    for(read(id); id != AT_NULL; read(id)) {
+        read(value);
+        ret[id] = value;
+    }
+    return ret;
 }
 
 } // namespace pdb
