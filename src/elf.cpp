@@ -1,4 +1,5 @@
 #include <libpdb/bit.hpp>
+#include <libpdb/dwarf.hpp>
 #include <libpdb/elf.hpp>
 #include <libpdb/error.hpp>
 
@@ -39,6 +40,8 @@ Elf::Elf(const std::filesystem::path& path)
     buildSectionMap();
     parseSymbolTable();
     buildSymbolMaps();
+
+    m_dwarf = std::make_unique<Dwarf>(*this);
 }
 
 Elf::~Elf()

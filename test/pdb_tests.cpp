@@ -1,4 +1,5 @@
 #include <libpdb/bit.hpp>
+#include <libpdb/dwarf.hpp>
 #include <libpdb/elf.hpp>
 #include <libpdb/error.hpp>
 #include <libpdb/pipe.hpp>
@@ -473,10 +474,10 @@ TEST_CASE("Syscall mapping works", "[syscall]")
 TEST_CASE("Syscall catchpoint work", "[catchpoint]")
 {
     auto devNull = open("/dev/null", O_WRONLY);
-    auto proc = pdb::Process::launch("targets/anti_debugger", true, devNull);
+    auto proc    = pdb::Process::launch("targets/anti_debugger", true, devNull);
 
     auto writeSyscall = pdb::syscallNameToId("write");
-    auto policy = pdb::SyscallCatchPolicy::catchSome({writeSyscall});
+    auto policy       = pdb::SyscallCatchPolicy::catchSome({writeSyscall});
     proc->setSyscallCatchPolicy(policy);
 
     proc->resume();
@@ -505,16 +506,105 @@ TEST_CASE("ELF parser works", "[elf]")
     auto path = "targets/hello_pdb";
     pdb::Elf elf(path);
     auto entry = elf.header().e_entry;
-    auto sym = elf.getSymbolAtAddress(pdb::FileAddr{elf, entry});
-    auto name = elf.getString(sym.value()->st_name);
+    auto sym   = elf.getSymbolAtAddress(pdb::FileAddr{elf, entry});
+    auto name  = elf.getString(sym.value()->st_name);
     REQUIRE(name == "_start");
 
     auto syms = elf.getSymbolsByName("_start");
-    name = elf.getString(syms.at(0)->st_name);
+    name      = elf.getString(syms.at(0)->st_name);
     REQUIRE(name == "_start");
 
     elf.notifyLoaded(pdb::VirtAddr{0xcafecafe});
-    sym = elf.getSymbolAtAddress(pdb::VirtAddr{0xcafecafe + entry});
+    sym  = elf.getSymbolAtAddress(pdb::VirtAddr{0xcafecafe + entry});
     name = elf.getString(sym.value()->st_name);
     REQUIRE(name == "_start");
+}
+
+TEST_CASE("Correct DWARF language", "[dwarf]")
+{
+    auto path = "targets/hello_pdb";
+    pdb::Elf elf(path);
+    auto& compileUnits = elf.getDwarf().compileUnits();
+    REQUIRE(compileUnits.size() == 1);
+
+    auto& cu  = compileUnits[0];
+    auto lang = cu->root()[DW_AT_language].asInt();
+    REQUIRE(lang == DW_LANG_C_plus_plus);
+}
+
+TEST_CASE("Iterate DWARF", "[dwarf]")
+{
+    auto path = "targets/hello_pdb";
+    pdb::Elf elf(path);
+    auto& compileUnits = elf.getDwarf().compileUnits();
+    REQUIRE(compileUnits.size() == 1);
+
+    auto& cu     = compileUnits[0];
+    size_t count = 0;
+    for(auto& d : cu->root().children()) {
+        auto a = d.abbrevEntry();
+        REQUIRE(a->code != 0);
+        ++count;
+    }
+    REQUIRE(count > 0);
+}
+
+TEST_CASE("Find main", "[dwarf]")
+{
+    auto path = "targets/multi_cu";
+    pdb::Elf elf(path);
+    pdb::Dwarf dwarf(elf);
+
+    bool found = false;
+    for(auto& cu : dwarf.compileUnits()) {
+        for(auto& die : cu->root().children()) {
+            if(die.abbrevEntry()->tag == DW_TAG_subprogram && die.contains(DW_AT_name)) {
+                auto name = die[DW_AT_name].asString();
+                if(name == "main") {
+                    found = true;
+                }
+            }
+        }
+    }
+    REQUIRE(found);
+}
+
+TEST_CASE("RangeList", "[dwarf]")
+{
+    auto path = "targets/multi_cu";
+    pdb::Elf elf(path);
+    pdb::Dwarf dwarf(elf);
+    auto& cu = dwarf.compileUnits()[0];
+
+    std::vector<uint64_t> rangeData{0x12341234, 0x12341236, ~0ULL, 0x32,
+                                    0x12341234, 0x12341236, 0x0,   0x0};
+
+    auto bytes = reinterpret_cast<std::byte*>(rangeData.data());
+    pdb::RangeList list(cu.get(), {bytes, bytes + rangeData.size()}, pdb::FileAddr{});
+
+    auto it = list.begin();
+    auto e1 = *it;
+    REQUIRE(e1.low.addr() == 0x12341234);
+    REQUIRE(e1.high.addr() == 0x12341236);
+    REQUIRE(e1.contains(pdb::FileAddr{elf, 0x12341234}));
+    REQUIRE(e1.contains(pdb::FileAddr{elf, 0x12341235}));
+    REQUIRE(!e1.contains(pdb::FileAddr{elf, 0x12341236}));
+
+    ++it;
+    auto e2 = *it;
+    REQUIRE(e2.low.addr() == 0x12341266);
+    REQUIRE(e2.high.addr() == 0x12341268);
+    REQUIRE(e2.contains(pdb::FileAddr{elf, 0x12341266}));
+    REQUIRE(e2.contains(pdb::FileAddr{elf, 0x12341267}));
+    REQUIRE(!e2.contains(pdb::FileAddr{elf, 0x12341268}));
+
+    ++it;
+    REQUIRE(it == list.end());
+
+    REQUIRE(list.contains(pdb::FileAddr{elf, 0x12341234}));
+    REQUIRE(list.contains(pdb::FileAddr{elf, 0x12341235}));
+    REQUIRE(!list.contains(pdb::FileAddr{elf, 0x12341236}));
+    REQUIRE(list.contains(pdb::FileAddr{elf, 0x12341266}));
+    REQUIRE(list.contains(pdb::FileAddr{elf, 0x12341267}));
+    REQUIRE(!list.contains(pdb::FileAddr{elf, 0x12341268}));
 }

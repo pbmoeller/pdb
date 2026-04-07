@@ -144,7 +144,7 @@ public:
     { }
     Span(T* data, T* end)
         : m_data{data}
-        , m_size{end - data}
+        , m_size(end - data)
     { }
     template<typename U>
     Span(const std::vector<U>& vec)

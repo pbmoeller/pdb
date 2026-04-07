@@ -14,6 +14,8 @@
 
 namespace pdb {
 
+class Dwarf;
+
 class Elf
 {
 public:
@@ -47,6 +49,9 @@ public:
     std::optional<const Elf64_Sym*> getSymbolContainingAddress(FileAddr addr) const;
     std::optional<const Elf64_Sym*> getSymbolContainingAddress(VirtAddr addr) const;
 
+    Dwarf& getDwarf() { return *m_dwarf; }
+    const Dwarf& getDwarf() const { return *m_dwarf; }
+
 private:
     void parseSectionHeaders();
     void buildSectionMap();
@@ -74,6 +79,7 @@ private:
     std::vector<Elf64_Sym> m_symbolTable;
     std::unordered_multimap<std::string_view, Elf64_Sym*> m_symbolNameMap;
     std::map<std::pair<FileAddr, FileAddr>, Elf64_Sym*, RangeComparator> m_symbolAddrMap;
+    std::unique_ptr<Dwarf> m_dwarf;
 };
 
 } // namespace pdb

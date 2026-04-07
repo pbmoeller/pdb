@@ -2,6 +2,7 @@ set(LIBPDB_HEADERS
     "${CMAKE_SOURCE_DIR}/include/libpdb/bit.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/breakpoint_site.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/disassembler.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/dwarf.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/elf.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/error.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/parse.hpp"
@@ -20,6 +21,7 @@ set(LIBPDB_HEADERS
 set(LIBPDB_SOURCES
     "breakpoint_site.cpp"
     "disassembler.cpp"
+    "dwarf.cpp"
     "elf.cpp"
     "pipe.cpp"
     "process.cpp"
