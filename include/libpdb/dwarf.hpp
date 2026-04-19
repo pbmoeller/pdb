@@ -3,6 +3,7 @@
 
 #include <libpdb/detail/dwarf.hpp>
 
+#include <filesystem>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -91,6 +92,112 @@ private:
     Entry m_current;
 };
 
+class LineTable
+{
+public:
+    struct File
+    {
+        std::filesystem::path path;
+        uint64_t modificationTime;
+        uint64_t fileLength;
+    };
+
+    struct Entry;
+
+public:
+    LineTable(Span<const std::byte> data, const CompileUnit* cu, bool defaultIsStmt,
+              int8_t lineBase, uint8_t lineRange, uint8_t opcodeBase,
+              std::vector<std::filesystem::path> includeDirectories, std::vector<File> fileNames)
+        : m_data(data)
+        , m_cu(cu)
+        , m_defaultIsStmt(defaultIsStmt)
+        , m_lineBase(lineBase)
+        , m_lineRange(lineRange)
+        , m_opcodeBase(opcodeBase)
+        , m_includeDirectories(includeDirectories)
+        , m_fileNames(fileNames)
+    { }
+
+    LineTable(const LineTable&)            = delete;
+    LineTable& operator=(const LineTable&) = delete;
+
+    const CompileUnit& cu() const { return *m_cu; }
+    const std::vector<File>& fileNames() const { return m_fileNames; }
+
+    class Iterator;
+    Iterator begin() const;
+    Iterator end() const;
+
+    Iterator getEntryByAddress(FileAddr address) const;
+    std::vector<Iterator> getEntriesByLine(std::filesystem::path path, size_t line) const;
+
+private:
+    Span<const std::byte> m_data;
+    const CompileUnit* m_cu;
+    bool m_defaultIsStmt;
+    int8_t m_lineBase;
+    uint8_t m_lineRange;
+    uint8_t m_opcodeBase;
+    std::vector<std::filesystem::path> m_includeDirectories;
+    mutable std::vector<File> m_fileNames;
+};
+
+struct LineTable::Entry
+{
+    FileAddr address;
+    uint64_t fileIndex{1};
+    uint64_t line{1};
+    uint64_t column{0};
+    bool isStmt;
+    bool basicBlockStart{false};
+    bool endSequence{false};
+    bool prologueEnd{false};
+    bool epilogueBegin{false};
+    uint64_t discriminator{0};
+    File* fileEntry{nullptr};
+
+    bool operator==(const Entry& rhs) const
+    {
+        return address == rhs.address && fileIndex == rhs.fileIndex && line == rhs.line
+            && column == rhs.column && discriminator == rhs.discriminator;
+    }
+};
+
+class LineTable::Iterator
+{
+public:
+    using value_type        = Entry;
+    using reference         = const Entry&;
+    using pointer           = const Entry*;
+    using difference_type   = std::ptrdiff_t;
+    using iterator_category = std::forward_iterator_tag;
+
+public:
+    Iterator(const LineTable* table);
+
+    Iterator()                           = default;
+    Iterator(const Iterator&)            = default;
+    Iterator& operator=(const Iterator&) = default;
+
+    const LineTable::Entry& operator*() const { return m_current; }
+    const LineTable::Entry* operator->() const { return &m_current; }
+
+    bool operator==(const Iterator& rhs) const { return m_pos == rhs.m_pos; }
+    bool operator!=(const Iterator& rhs) const { return m_pos != rhs.m_pos; }
+
+    Iterator& operator++();
+    Iterator operator++(int);
+
+private:
+    bool executeInstruction();
+
+private:
+    const LineTable* m_table;
+    LineTable::Entry m_current;
+    LineTable::Entry m_registers;
+    const std::byte* m_pos;
+};
+
 class Attr
 {
 public:
@@ -123,11 +230,7 @@ private:
 class CompileUnit
 {
 public:
-    CompileUnit(Dwarf& parent, Span<const std::byte> data, size_t abbrevOffset)
-        : m_parent(&parent)
-        , m_data(data)
-        , m_abbrevOffset(abbrevOffset)
-    { }
+    CompileUnit(Dwarf& parent, Span<const std::byte> data, size_t abbrevOffset);
 
     const Dwarf* dwarfInfo() const { return m_parent; }
     Span<const std::byte> data() const { return m_data; }
@@ -136,10 +239,19 @@ public:
 
     Die root() const;
 
+    const LineTable& lines() const { return *m_lineTable; }
+
 private:
     Dwarf* m_parent;
     Span<const std::byte> m_data;
     size_t m_abbrevOffset;
+    std::unique_ptr<LineTable> m_lineTable;
+};
+
+struct SourceLocation
+{
+    const LineTable::File *file;
+    uint64_t line;
 };
 
 class Die
@@ -174,6 +286,10 @@ public:
     bool containsAddress(FileAddr address) const;
 
     std::optional<std::string_view> name() const;
+
+    SourceLocation location() const;
+    const LineTable::File& file() const;
+    uint64_t line() const;
 
 private:
     const std::byte* m_pos{nullptr};
@@ -246,6 +362,8 @@ public:
     std::optional<Die> functionContainingAddress(FileAddr address) const;
 
     std::vector<Die> findFunctions(std::string name) const;
+
+    LineTable::Iterator lineEntryAtAddress(FileAddr address) const;
 
 private:
     void index() const;

@@ -608,3 +608,32 @@ TEST_CASE("RangeList", "[dwarf]")
     REQUIRE(list.contains(pdb::FileAddr{elf, 0x12341267}));
     REQUIRE(!list.contains(pdb::FileAddr{elf, 0x12341268}));
 }
+
+TEST_CASE("LineTable", "[dwarf]")
+{
+    auto path = "targets/hello_pdb";
+    pdb::Elf elf(path);
+    pdb::Dwarf dwarf(elf);
+
+    REQUIRE(dwarf.compileUnits().size() == 1);
+
+    auto &cu = dwarf.compileUnits()[0];
+    auto it = cu->lines().begin();
+
+    REQUIRE(it->line == 3);
+    REQUIRE(it->fileEntry->path.filename() == "hello_pdb.cpp");
+
+    ++it;
+    REQUIRE(it->line == 4);
+
+    ++it;
+    REQUIRE(it->line == 5);
+
+    ++it;
+    REQUIRE(it->line == 6);
+
+    ++it;
+    REQUIRE(it->endSequence);
+    ++it;
+    REQUIRE(it == cu->lines().end());
+}
