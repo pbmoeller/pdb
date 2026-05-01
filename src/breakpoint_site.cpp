@@ -27,6 +27,20 @@ BreakpointSite::BreakpointSite(Process& process, VirtAddr address, bool isHardwa
     m_id = m_isInternal ? -1 : getNextId();
 }
 
+BreakpointSite::BreakpointSite(Breakpoint* parent, IdType id, Process& process, VirtAddr address,
+                               bool isHardware, bool isInternal)
+    : m_parent{parent}
+    , m_id{id}
+    , m_process{&process}
+    , m_address{address}
+    , m_isEnabled{false}
+    , m_savedData{}
+    , m_isHardware{isHardware}
+    , m_isInternal{isInternal}
+{
+    
+}
+
 void BreakpointSite::enable()
 {
     if(m_isEnabled) {

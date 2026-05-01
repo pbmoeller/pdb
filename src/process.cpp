@@ -2,6 +2,7 @@
 #include <libpdb/error.hpp>
 #include <libpdb/pipe.hpp>
 #include <libpdb/process.hpp>
+#include <libpdb/target.hpp>
 #include <libpdb/types.hpp>
 
 #include <elf.h>
@@ -223,6 +224,9 @@ StopReason Process::waitOnSignal()
                 reason = maybeResumeFromSyscall(reason);
             }
         }
+        if(m_target) {
+            m_target->notifyStop(reason);
+        }
     }
 
     return reason;
@@ -277,6 +281,16 @@ BreakpointSite& Process::createBreakpointSite(VirtAddr address, bool hardware, b
     }
     return m_breakpointSites.push(
         std::unique_ptr<BreakpointSite>(new BreakpointSite(*this, address, hardware, internal)));
+}
+
+BreakpointSite& Process::createBreakpointSite(Breakpoint* parent, BreakpointSite::IdType id,
+                                              VirtAddr address, bool hardware, bool internal)
+{
+    if(m_breakpointSites.containsAddress(address)) {
+        Error::send("Breakpoint site already created at address " + std::to_string(address.addr()));
+    }
+    return m_breakpointSites.push(std::unique_ptr<BreakpointSite>(
+        new BreakpointSite(parent, id, *this, address, hardware, internal)));
 }
 
 std::vector<std::byte> Process::readMemory(VirtAddr address, size_t amount) const
@@ -384,11 +398,11 @@ Process::getCurrentHardwareStoppoint() const
     }
 }
 
-StopReason Process::maybeResumeFromSyscall(const StopReason &reason)
+StopReason Process::maybeResumeFromSyscall(const StopReason& reason)
 {
     if(m_syscallCatchPolicy.getMode() == SyscallCatchPolicy::Mode::Some) {
-        auto &toCatch = m_syscallCatchPolicy.getToCatch();
-        auto found = std::find(std::begin(toCatch), std::end(toCatch), reason.syscallInfo->id);
+        auto& toCatch = m_syscallCatchPolicy.getToCatch();
+        auto found    = std::find(std::begin(toCatch), std::end(toCatch), reason.syscallInfo->id);
 
         if(found == std::end(toCatch)) {
             resume();
@@ -460,27 +474,26 @@ void Process::augmentStopReason(StopReason& reason)
     }
 
     if(reason.info == (SIGTRAP | 0x80)) {
-        auto &sysInfo = reason.syscallInfo.emplace();
-        auto &regs = getRegisters();
+        auto& sysInfo = reason.syscallInfo.emplace();
+        auto& regs    = getRegisters();
 
         if(m_expectingSyscallExit) {
-            sysInfo.entry = false;
-            sysInfo.id = regs.readByIdAs<uint64_t>(RegisterId::orig_rax);
-            sysInfo.ret = regs.readByIdAs<uint64_t>(RegisterId::rax);
+            sysInfo.entry          = false;
+            sysInfo.id             = regs.readByIdAs<uint64_t>(RegisterId::orig_rax);
+            sysInfo.ret            = regs.readByIdAs<uint64_t>(RegisterId::rax);
             m_expectingSyscallExit = false;
         } else {
-            sysInfo.entry = true;
-            sysInfo.id = regs.readByIdAs<uint64_t>(RegisterId::orig_rax);
-            std::array<RegisterId, 6> argRegs = {
-                RegisterId::rdi, RegisterId::rsi, RegisterId::rdx, RegisterId::r10, RegisterId::r8, RegisterId::r9
-            };
+            sysInfo.entry                     = true;
+            sysInfo.id                        = regs.readByIdAs<uint64_t>(RegisterId::orig_rax);
+            std::array<RegisterId, 6> argRegs = {RegisterId::rdi, RegisterId::rsi, RegisterId::rdx,
+                                                 RegisterId::r10, RegisterId::r8,  RegisterId::r9};
             for(auto i = 0; i < 6; ++i) {
                 sysInfo.args[i] = regs.readByIdAs<uint64_t>(argRegs[i]);
             }
             m_expectingSyscallExit = true;
         }
 
-        reason.info = SIGTRAP;
+        reason.info       = SIGTRAP;
         reason.trapReason = TrapType::Syscall;
         return;
     }
@@ -512,9 +525,7 @@ std::unordered_map<int, uint64_t> Process::getAuxv() const
     uint64_t id;
     uint64_t value;
 
-    auto read = [&](auto&into) {
-        auxv.read(reinterpret_cast<char*>(&into), sizeof(into));
-        };
+    auto read = [&](auto& into) { auxv.read(reinterpret_cast<char*>(&into), sizeof(into)); };
 
     for(read(id); id != AT_NULL; read(id)) {
         read(value);

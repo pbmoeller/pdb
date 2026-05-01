@@ -954,6 +954,28 @@ LineTable::Iterator Dwarf::lineEntryAtAddress(FileAddr address) const
     return cu->lines().getEntryByAddress(address);
 }
 
+std::vector<Die> Dwarf::inlineStackAtAddress(FileAddr address) const
+{
+    auto func = functionContainingAddress(address);
+    std::vector<Die> stack;
+    if(func) {
+        stack.push_back(*func);
+        while(true) {
+            const auto& children = stack.back().children();
+            auto found           = std::find_if(children.begin(), children.end(), [=](auto& child) {
+                return child.abbrevEntry()->tag == DW_TAG_inlined_subroutine
+                    && child.containsAddress(address);
+            });
+            if(found == children.end()) {
+                break;
+            } else {
+                stack.push_back(*found);
+            }
+        }
+    }
+    return stack;
+}
+
 void Dwarf::index() const
 {
     if(!m_functionIndex.empty()) {

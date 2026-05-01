@@ -1,6 +1,7 @@
 #ifndef LIBPDB_DWARF_HPP
 #define LIBPDB_DWARF_HPP
 
+#include <libpdb/types.hpp>
 #include <libpdb/detail/dwarf.hpp>
 
 #include <filesystem>
@@ -312,7 +313,7 @@ public:
         using value_type        = Die;
         using reference         = const Die&;
         using pointer           = const Die*;
-        using difference_ytpe   = std::ptrdiff_t;
+        using difference_type   = std::ptrdiff_t;
         using iterator_category = std::forward_iterator_tag;
 
         Iterator()                           = default;
@@ -364,6 +365,8 @@ public:
     std::vector<Die> findFunctions(std::string name) const;
 
     LineTable::Iterator lineEntryAtAddress(FileAddr address) const;
+
+    std::vector<Die> inlineStackAtAddress(FileAddr address) const;
 
 private:
     void index() const;

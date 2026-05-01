@@ -12,7 +12,10 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cmath>
+#include <filesystem>
 #include <format>
+#include <fstream>
 #include <iostream>
 #include <memory>
 #include <ranges>
@@ -52,6 +55,38 @@ void printDisassembly(pdb::Process& process, pdb::VirtAddr address, size_t instr
     for(auto& inst : instructions) {
         std::cout << std::format("{:#018x}: {}\n", inst.address.addr(), inst.text);
     }
+}
+
+void printSource(const std::filesystem::path& path, uint64_t line, uint64_t nLinesContext)
+{
+    std::ifstream file{path.string()};
+    auto startLine = line <= nLinesContext ? 1 : line - nLinesContext;
+    auto endLine   = line + nLinesContext + 1;
+
+    char c{};
+    auto currentLine = 1u;
+    while(currentLine != startLine && file.get(c)) {
+        if(c == '\n') {
+            ++currentLine;
+        }
+    }
+
+    auto printLineStart = [&](auto currentLine) {
+        auto fillWidth = static_cast<int>(std::floor(std::log10(endLine))) + 1;
+        auto arrow     = currentLine == line ? ">" : " ";
+        std::cout << std::format("{} {:>{}} ", arrow, currentLine, fillWidth);
+    };
+
+    printLineStart(currentLine);
+    while(currentLine <= endLine && file.get(c)) {
+        std::cout << c;
+        if(c == '\n') {
+            ++currentLine;
+            printLineStart(currentLine);
+        }
+    }
+
+    std::cout << std::endl;
 }
 
 std::vector<std::string> split(std::string_view str, char delimiter)
@@ -145,12 +180,20 @@ std::string getSigtrapInfo(const pdb::Process& process, pdb::StopReason reason)
 
 std::string getSignalStopReason(const pdb::Target& target, pdb::StopReason reason)
 {
-    auto& process       = target.getProcess();
-    std::string message = std::format("stopped with signal {} at {:#x}", sigabbrev_np(reason.info),
-                                      process.getProgramCounter().addr());
-    auto func = target.getElf().getSymbolContainingAddress(process.getProgramCounter());
-    if(func && ELF64_ST_TYPE(func.value()->st_info) == STT_FUNC) {
-        message += std::format(" ({})", target.getElf().getString(func.value()->st_name));
+    auto& process = target.getProcess();
+    auto pc       = process.getProgramCounter();
+    std::string message =
+        std::format("stopped with signal {} at {:#x}", sigabbrev_np(reason.info), pc.addr());
+
+    auto line = target.lineEntryAtPc();
+    if(line != pdb::LineTable::Iterator()) {
+        auto file = line->fileEntry->path.filename().string();
+        message += std::format(", {}:{}", file, line->line);
+    }
+
+    auto funcName = target.functionNameAtAddress(pc);
+    if(funcName != "") {
+        message += std::format(" ({})", funcName);
     }
 
     if(reason.info == SIGTRAP) {
@@ -188,7 +231,15 @@ void handleStop(pdb::Target& target, pdb::StopReason reason)
 {
     printStopReason(target, reason);
     if(reason.reason == pdb::ProcessState::Stopped) {
-        printDisassembly(target.getProcess(), target.getProcess().getProgramCounter(), 5);
+        if(target.getStack().inlineHeight() > 0) {
+            auto stack = target.getStack().inlineStackAtPc();
+            auto frame = stack[stack.size() - target.getStack().inlineHeight()];
+            printSource(frame.file().path, frame.line(), 3);
+        } else if(auto entry = target.lineEntryAtPc(); entry != pdb::LineTable::Iterator()) {
+            printSource(entry->fileEntry->path, entry->line, 3);
+        } else {
+            printDisassembly(target.getProcess(), target.getProcess().getProgramCounter(), 5);
+        }
     }
 }
 
@@ -200,9 +251,12 @@ void printHelp(const std::vector<std::string>& args)
     catchpoint  - Commands for operating on catchpoints
     continue    - Resume the process
     disassemble - Disassemble machine code to assembly
+    finish      - Step-out
     memory      - Operations on memory
+    next        - Step-over
     register    - Commands for operating on registers
-    step        - Step over a single instruction
+    step        - Step-in
+    stepi       - Single instruction step
     watchpoint  - Commands for operating on watchpoints
 )";
     } else if(isPrefix(args[1], "register")) {
@@ -303,10 +357,8 @@ pdb::Registers::Value parseRegisterValue(pdb::RegisterInfo info, std::string_vie
             }
         } else if(info.format == pdb::RegisterFormat::DOUBLE_FLOAT) {
             return pdb::toFloat<double>(text).value();
-
         } else if(info.format == pdb::RegisterFormat::LONG_DOUBLE) {
             return pdb::toFloat<long double>(text).value();
-
         } else if(info.format == pdb::RegisterFormat::VECTOR) {
             if(info.size == 8) {
                 return pdb::parseVector<8>(text);
@@ -353,7 +405,103 @@ void handleRegisterCommand(pdb::Process& process, const std::vector<std::string>
     }
 }
 
-void handleBreakpointCommand(pdb::Process& process, const std::vector<std::string>& args)
+void handleBreakpointListCommand(pdb::Target& target)
+{
+    if(target.breakpoints().empty()) {
+        std::cout << "No breakpoints set\n";
+    } else {
+        std::cout << "Current Breakpoints:\n";
+        target.breakpoints().forEach([](auto& bp) {
+            if(bp.isInternal()) {
+                return;
+            }
+            std::cout << bp.id() << ": ";
+            if(auto funcBp = dynamic_cast<pdb::FunctionBreakpoint*>(&bp)) {
+                std::cout << "function = " << funcBp->functionName();
+            } else if(auto lineBp = dynamic_cast<pdb::LineBreakpoint*>(&bp)) {
+                std::cout << "file = " << lineBp->file() << ", line = " << lineBp->line();
+            } else if(auto addrBp = dynamic_cast<pdb::AddressBreakpoint*>(&bp)) {
+                std::cout << std::format("address = {:#x}", addrBp->address().addr());
+            }
+            std::cout << ", " << (bp.isEnabled() ? "enabled" : "disabled") << ":\n";
+            bp.breakpointSites().forEach([&](auto& site) {
+                std::cout << std::format("    .{}: address = {:#x}, {}\n", site.id(),
+                                         site.address().addr(),
+                                         site.isEnabled() ? "enabled" : "disabled");
+            });
+        });
+    }
+}
+
+void handleBreakpointSetCommand(pdb::Target& target, const std::vector<std::string>& args)
+{
+    bool hardware = false;
+    if(args.size() == 4) {
+        if(args[3] == "-h") {
+            hardware = true;
+        } else {
+            pdb::Error::send("Invalid breakpoint command argument");
+        }
+    }
+    if(args[2].find("0x") == 0) {
+        auto address = pdb::toIntegral<uint64_t>(args[2], 16);
+        if(!address) {
+            std::cerr << "Breakpoint command expects address in hexadecimal, prefixed with '0x'"
+                      << std::endl;
+        }
+        target.createAddressBreakpoint(pdb::VirtAddr{*address}, hardware).enable();
+    } else if(args[2].find(':') != std::string::npos) {
+        auto data = split(args[2], ':');
+        auto path = data[0];
+        auto line = pdb::toIntegral<uint64_t>(data[1]);
+        if(!line) {
+            std::cerr << "Line number should be an integer" << std::endl;
+            return;
+        }
+        target.createLineBreakpoint(path, *line, hardware).enable();
+    } else {
+        target.createFunctionBreakpoint(args[2]).enable();
+    }
+}
+
+void handleBreakpointToggle(pdb::Target& target, const std::vector<std::string>& args)
+{
+    auto command = args[1];
+
+    auto dotPos = args[2].find('.');
+    auto idStr  = args[2].substr(0, dotPos);
+    auto id     = pdb::toIntegral<pdb::Breakpoint::IdType>(idStr);
+    if(!id) {
+        std::cerr << "Command expects breakpoint id";
+        return;
+    }
+    auto& bp = target.breakpoints().getById(*id);
+
+    if(dotPos != std::string::npos) {
+        auto siteIdStr = args[2].substr(dotPos + 1);
+        auto siteId    = pdb::toIntegral<pdb::Breakpoint::IdType>(siteIdStr);
+        if(!siteId) {
+            std::cerr << "Command expects breakpoint site id";
+            return;
+        }
+        if(isPrefix(command, "enable")) {
+            bp.breakpointSites().getById(*siteId).enable();
+        } else if(isPrefix(command, "disable")) {
+            bp.breakpointSites().getById(*siteId).disable();
+        }
+    } else if(isPrefix(command, "enable")) {
+        bp.enable();
+    } else if(isPrefix(command, "disable")) {
+        bp.disable();
+    } else if(isPrefix(command, "delete")) {
+        bp.breakpointSites().forEach([&](auto& site) {
+            target.getProcess().breakpointSites().removeByAddress(site.address());
+        });
+        target.breakpoints().removeById(*id);
+    }
+}
+
+void handleBreakpointCommand(pdb::Target& target, const std::vector<std::string>& args)
 {
     if(args.size() < 2) {
         printHelp({"help", "breakpoint"});
@@ -362,19 +510,7 @@ void handleBreakpointCommand(pdb::Process& process, const std::vector<std::strin
 
     auto command = args[1];
     if(isPrefix(command, "list")) {
-        if(process.breakpointSites().empty()) {
-            std::cout << "No breakpoints set\n";
-        } else {
-            std::cout << "Current breakpoints:\n";
-            process.breakpointSites().forEach([](auto& site) {
-                if(site.isInternal()) {
-                    return;
-                }
-                std::cout << std::format("{}: address = {:#x}, {}\n", site.id(),
-                                         site.address().addr(),
-                                         site.isEnabled() ? "enabled" : "disabled");
-            });
-        }
+        handleBreakpointListCommand(target);
         return;
     }
 
@@ -384,39 +520,11 @@ void handleBreakpointCommand(pdb::Process& process, const std::vector<std::strin
     }
 
     if(isPrefix(command, "set")) {
-        auto address = pdb::toIntegral<uint64_t>(args[2], 16);
-
-        if(!address) {
-            std::cerr << "Breakpoint command expects address in hexadecimal, prefixed with '0x'\n";
-            return;
-        }
-
-        bool hardware = false;
-        if(args.size() == 4) {
-            if(args[3] == "-h") {
-                hardware = true;
-            } else {
-                pdb::Error::send("Invalid breakpoint command argument");
-            }
-        }
-
-        process.createBreakpointSite(pdb::VirtAddr{*address}, hardware).enable();
+        handleBreakpointSetCommand(target, args);
         return;
     }
 
-    auto id = pdb::toIntegral<pdb::BreakpointSite::IdType>(args[2]);
-    if(!id) {
-        std::cerr << "Command expects breakpoint id\n";
-        return;
-    }
-
-    if(isPrefix(command, "enable")) {
-        process.breakpointSites().getById(*id).enable();
-    } else if(isPrefix(command, "disable")) {
-        process.breakpointSites().getById(*id).disable();
-    } else if(isPrefix(command, "delete")) {
-        process.breakpointSites().removeById(*id);
-    }
+    handleBreakpointToggle(target, args);
 }
 
 void handleMemoryReadCommand(pdb::Process& process, const std::vector<std::string>& args)
@@ -644,8 +752,17 @@ void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
     } else if(isPrefix(command, "register")) {
         handleRegisterCommand(*process, args);
     } else if(isPrefix(command, "breakpoint")) {
-        handleBreakpointCommand(*process, args);
+        handleBreakpointCommand(*target, args);
+    } else if(isPrefix(command, "next")) {
+        auto reason = target->stepOver();
+        handleStop(*target, reason);
+    } else if(isPrefix(command, "finish")) {
+        auto reason = target->stepOut();
+        handleStop(*target, reason);
     } else if(isPrefix(command, "step")) {
+        auto reason = target->stepIn();
+        handleStop(*target, reason);
+    } else if(isPrefix(command, "stepi")) {
         auto reason = process->stepInstruction();
         handleStop(*target, reason);
     } else if(isPrefix(command, "memory")) {

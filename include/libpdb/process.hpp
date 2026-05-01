@@ -10,6 +10,7 @@
 
 #include <sys/types.h>
 
+#include <csignal>
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -46,7 +47,27 @@ struct SyscallInformation
 
 struct StopReason
 {
+    StopReason() = default;
     StopReason(int waitStatus);
+    StopReason(ProcessState reason, uint8_t info, std::optional<TrapType> trapReason = std::nullopt,
+               std::optional<SyscallInformation> syscallInfo = std::nullopt)
+        : reason(reason)
+        , info(info)
+        , trapReason(trapReason)
+        , syscallInfo(syscallInfo)
+    { }
+
+    bool isStep() const
+    {
+        return reason == ProcessState::Stopped && info == SIGTRAP
+            && trapReason == TrapType::SingleStep;
+    }
+
+    bool isBreakpoint() const
+    {
+        return reason == ProcessState::Stopped && info == SIGTRAP
+            && (trapReason == TrapType::SoftwareBreak || trapReason == TrapType::HardwareBreak);
+    }
 
     ProcessState reason;
     uint8_t info;
@@ -83,6 +104,8 @@ private:
     Mode m_mode{Mode::None};
     std::vector<int> m_toCatch;
 };
+
+class Target;
 
 class Process
 {
@@ -123,6 +146,9 @@ public:
 
     BreakpointSite& createBreakpointSite(VirtAddr address, bool hardware = false,
                                          bool internal = false);
+    BreakpointSite& createBreakpointSite(Breakpoint* parent, BreakpointSite::IdType idType,
+                                         VirtAddr address, bool hardware = false,
+                                         bool internal = false);
 
     StoppointCollection<BreakpointSite>& breakpointSites() { return m_breakpointSites; }
     const StoppointCollection<BreakpointSite>& breakpointSites() const { return m_breakpointSites; }
@@ -155,6 +181,8 @@ public:
 
     std::unordered_map<int, uint64_t> getAuxv() const;
 
+    void setTarget(Target* target) { m_target = target; }
+
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 
@@ -174,6 +202,7 @@ private:
     StoppointCollection<Watchpoint> m_watchpoints;
     SyscallCatchPolicy m_syscallCatchPolicy{SyscallCatchPolicy::catchNone()};
     bool m_expectingSyscallExit{false};
+    Target* m_target{nullptr};
 };
 
 } // namespace pdb

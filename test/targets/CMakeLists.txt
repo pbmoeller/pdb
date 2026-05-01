@@ -24,6 +24,8 @@ add_test_cpp_target(end_immediately)
 add_test_cpp_target(hello_pdb)
 add_test_cpp_target(memory)
 add_test_cpp_target(anti_debugger)
+add_test_cpp_target(overloaded)
+add_test_cpp_target(step)
 
 add_executable(multi_cu
     "multi_cu.cpp"

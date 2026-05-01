@@ -8,6 +8,7 @@
 
 namespace pdb {
 
+class Breakpoint;
 class Process;
 
 class BreakpointSite
@@ -37,10 +38,13 @@ public:
 
 private:
     friend Process;
-    BreakpointSite(Process& process, VirtAddr address, bool isHardware = false,
-                   bool isInternal = false);
+    BreakpointSite(Process& process, VirtAddr address,
+                   bool isHardware = false, bool isInternal = false);
+    BreakpointSite(Breakpoint* parent, IdType id, Process& process, VirtAddr address,
+                   bool isHardware = false, bool isInternal = false);
 
 private:
+    Breakpoint *m_parent{nullptr};
     IdType m_id;
     Process* m_process;
     VirtAddr m_address;

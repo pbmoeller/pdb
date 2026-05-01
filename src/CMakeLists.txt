@@ -1,5 +1,6 @@
 set(LIBPDB_HEADERS
     "${CMAKE_SOURCE_DIR}/include/libpdb/bit.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/breakpoint.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/breakpoint_site.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/disassembler.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/dwarf.hpp"
@@ -11,6 +12,7 @@ set(LIBPDB_HEADERS
     "${CMAKE_SOURCE_DIR}/include/libpdb/registers.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/register_info.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/stoppoint_collection.hpp"
+    "${CMAKE_SOURCE_DIR}/include/libpdb/stack.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/syscalls.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/target.hpp"
     "${CMAKE_SOURCE_DIR}/include/libpdb/types.hpp"
@@ -19,6 +21,7 @@ set(LIBPDB_HEADERS
 )
 
 set(LIBPDB_SOURCES
+    "breakpoint.cpp"
     "breakpoint_site.cpp"
     "disassembler.cpp"
     "dwarf.cpp"
@@ -27,9 +30,10 @@ set(LIBPDB_SOURCES
     "process.cpp"
     "registers.cpp"
     "syscalls.cpp"
-    "watchpoint.cpp"
+    "stack.cpp"
     "target.cpp"
     "types.cpp"
+    "watchpoint.cpp"
 )
 
 add_library(libpdb)

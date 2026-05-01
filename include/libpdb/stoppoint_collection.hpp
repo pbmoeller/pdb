@@ -6,15 +6,19 @@
 
 #include <algorithm>
 #include <memory>
+#include <type_traits>
 #include <vector>
 
 namespace pdb {
 
-template<typename Stoppoint>
+template<typename Stoppoint, bool Owning = true>
 class StoppointCollection
 {
 public:
-    Stoppoint& push(std::unique_ptr<Stoppoint> stoppoint)
+    using PointerType = std::conditional_t<Owning, std::unique_ptr<Stoppoint>, Stoppoint*>;
+
+public:
+    Stoppoint& push(PointerType stoppoint)
     {
         m_stoppoints.push_back(std::move(stoppoint));
         return *m_stoppoints.back();
@@ -43,7 +47,7 @@ public:
     bool empty() const { return m_stoppoints.empty(); }
 
 private:
-    using Points_t = std::vector<std::unique_ptr<Stoppoint>>;
+    using Points_t = std::vector<PointerType>;
 
     typename Points_t::iterator findById(typename Stoppoint::IdType id);
     typename Points_t::const_iterator findById(typename Stoppoint::IdType id) const;
@@ -54,26 +58,27 @@ private:
     Points_t m_stoppoints;
 };
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::containsId(typename Stoppoint::IdType id) const -> bool
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::containsId(typename Stoppoint::IdType id) const -> bool
 {
     return findById(id) != std::end(m_stoppoints);
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::containsAddress(VirtAddr address) const -> bool
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::containsAddress(VirtAddr address) const -> bool
 {
     return findByAddress(address) != std::end(m_stoppoints);
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::enabledStoppointAtAddress(VirtAddr address) const -> bool
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::enabledStoppointAtAddress(VirtAddr address) const
+    -> bool
 {
     return containsAddress(address) && getByAddress(address).isEnabled();
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::getById(typename Stoppoint::IdType id) -> Stoppoint&
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::getById(typename Stoppoint::IdType id) -> Stoppoint&
 {
     auto it = findById(id);
     if(it == std::end(m_stoppoints)) {
@@ -82,15 +87,15 @@ auto StoppointCollection<Stoppoint>::getById(typename Stoppoint::IdType id) -> S
     return **it;
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::getById(typename Stoppoint::IdType id) const
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::getById(typename Stoppoint::IdType id) const
     -> const Stoppoint&
 {
     return const_cast<StoppointCollection<Stoppoint>*>(this)->getById(id);
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::getByAddress(VirtAddr address) -> Stoppoint&
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::getByAddress(VirtAddr address) -> Stoppoint&
 {
     auto it = findByAddress(address);
     if(it == std::end(m_stoppoints)) {
@@ -99,14 +104,15 @@ auto StoppointCollection<Stoppoint>::getByAddress(VirtAddr address) -> Stoppoint
     return **it;
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::getByAddress(VirtAddr address) const -> const Stoppoint&
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::getByAddress(VirtAddr address) const
+    -> const Stoppoint&
 {
     return const_cast<StoppointCollection<Stoppoint>*>(this)->getByAddress(address);
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::getInRegion(VirtAddr low, VirtAddr high) const
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::getInRegion(VirtAddr low, VirtAddr high) const
     -> std::vector<Stoppoint*>
 {
     std::vector<Stoppoint*> ret;
@@ -118,64 +124,65 @@ auto StoppointCollection<Stoppoint>::getInRegion(VirtAddr low, VirtAddr high) co
     return ret;
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::removeById(typename Stoppoint::IdType id) -> void
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::removeById(typename Stoppoint::IdType id) -> void
 {
     auto it = findById(id);
     (**it).disable();
     m_stoppoints.erase(it);
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::removeByAddress(VirtAddr address) -> void
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::removeByAddress(VirtAddr address) -> void
 {
     auto it = findByAddress(address);
     (**it).disable();
     m_stoppoints.erase(it);
 }
 
-template<typename Stoppoint>
+template<typename Stoppoint, bool Owning>
 template<typename Function>
-auto StoppointCollection<Stoppoint>::forEach(Function f) -> void
+auto StoppointCollection<Stoppoint, Owning>::forEach(Function f) -> void
 {
     for(auto& point : m_stoppoints) {
         f(*point);
     }
 }
 
-template<typename Stoppoint>
+template<typename Stoppoint, bool Owning>
 template<typename Function>
-auto StoppointCollection<Stoppoint>::forEach(Function f) const -> void
+auto StoppointCollection<Stoppoint, Owning>::forEach(Function f) const -> void
 {
     for(const auto& point : m_stoppoints) {
         f(*point);
     }
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::findById(typename Stoppoint::IdType id) ->
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::findById(typename Stoppoint::IdType id) ->
     typename Points_t::iterator
 {
     return std::find_if(std::begin(m_stoppoints), std::end(m_stoppoints),
                         [=](auto& point) { return point->id() == id; });
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::findById(typename Stoppoint::IdType id) const ->
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::findById(typename Stoppoint::IdType id) const ->
     typename Points_t::const_iterator
 {
     return const_cast<StoppointCollection*>(this)->findById(id);
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::findByAddress(VirtAddr address) -> typename Points_t::iterator
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::findByAddress(VirtAddr address) ->
+    typename Points_t::iterator
 {
     return std::find_if(std::begin(m_stoppoints), std::end(m_stoppoints),
                         [=](auto& point) { return point->atAddress(address); });
 }
 
-template<typename Stoppoint>
-auto StoppointCollection<Stoppoint>::findByAddress(VirtAddr address) const ->
+template<typename Stoppoint, bool Owning>
+auto StoppointCollection<Stoppoint, Owning>::findByAddress(VirtAddr address) const ->
     typename Points_t::const_iterator
 {
     return const_cast<StoppointCollection*>(this)->findByAddress(address);

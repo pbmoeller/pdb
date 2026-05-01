@@ -6,6 +6,7 @@
 #include <libpdb/process.hpp>
 #include <libpdb/registers.hpp>
 #include <libpdb/syscalls.hpp>
+#include <libpdb/target.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -617,8 +618,8 @@ TEST_CASE("LineTable", "[dwarf]")
 
     REQUIRE(dwarf.compileUnits().size() == 1);
 
-    auto &cu = dwarf.compileUnits()[0];
-    auto it = cu->lines().begin();
+    auto& cu = dwarf.compileUnits()[0];
+    auto it  = cu->lines().begin();
 
     REQUIRE(it->line == 3);
     REQUIRE(it->fileEntry->path.filename() == "hello_pdb.cpp");
@@ -636,4 +637,92 @@ TEST_CASE("LineTable", "[dwarf]")
     REQUIRE(it->endSequence);
     ++it;
     REQUIRE(it == cu->lines().end());
+}
+
+TEST_CASE("Source-level breakpoint", "[breakpoint]")
+{
+    auto devNull = open("/dev/null", O_WRONLY);
+    auto target  = pdb::Target::launch("targets/overloaded", devNull);
+
+    auto& proc = target->getProcess();
+
+    target->createLineBreakpoint("overloaded.cpp", 21).enable();
+
+    proc.resume();
+    proc.waitOnSignal();
+
+    auto entry = target->lineEntryAtPc();
+    REQUIRE(entry->fileEntry->path.filename() == "overloaded.cpp");
+    REQUIRE(entry->line == 21);
+
+    auto& bkpt = target->createFunctionBreakpoint("printType");
+    bkpt.enable();
+
+    pdb::BreakpointSite* lowestBkpt = nullptr;
+    bkpt.breakpointSites().forEach([&lowestBkpt](auto& site) {
+        if(lowestBkpt == nullptr || site.address().addr() < lowestBkpt->address().addr()) {
+            lowestBkpt = &site;
+        }
+    });
+
+    lowestBkpt->disable();
+
+    proc.resume();
+    proc.waitOnSignal();
+
+    REQUIRE(target->lineEntryAtPc()->line == 11);
+
+    proc.resume();
+    proc.waitOnSignal();
+
+    REQUIRE(target->lineEntryAtPc()->line == 16);
+
+    proc.resume();
+    auto reason = proc.waitOnSignal();
+
+    REQUIRE(reason.reason == pdb::ProcessState::Exited);
+    close(devNull);
+}
+
+TEST_CASE("Source-level stepping", "[target]")
+{
+    auto devNull = open("/dev/null", O_WRONLY);
+    auto target  = pdb::Target::launch("targets/step", devNull);
+    auto& proc   = target->getProcess();
+
+    target->createFunctionBreakpoint("main").enable();
+    proc.resume();
+    proc.waitOnSignal();
+
+    auto pc = proc.getProgramCounter();
+    REQUIRE(target->functionNameAtAddress(pc) == "main");
+
+    target->stepOver();
+
+    auto newPc = proc.getProgramCounter();
+    REQUIRE(newPc != pc);
+    REQUIRE(target->functionNameAtAddress(pc) == "main");
+
+    target->stepIn();
+
+    pc = proc.getProgramCounter();
+    REQUIRE(target->functionNameAtAddress(pc) == "findHappiness");
+    REQUIRE(target->getStack().inlineHeight() == 2);
+
+    target->stepIn();
+
+    newPc = proc.getProgramCounter();
+    REQUIRE(newPc == pc);
+    REQUIRE(target->getStack().inlineHeight() == 1);
+
+    target->stepOut();
+    newPc = proc.getProgramCounter();
+    REQUIRE(newPc != pc);
+    REQUIRE(target->functionNameAtAddress(pc) == "findHappiness");
+
+    target->stepOut();
+
+    pc = proc.getProgramCounter();
+    REQUIRE(target->functionNameAtAddress(pc) == "main");
+    close(devNull);
 }
