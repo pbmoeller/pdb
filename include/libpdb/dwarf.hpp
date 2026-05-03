@@ -1,8 +1,9 @@
 #ifndef LIBPDB_DWARF_HPP
 #define LIBPDB_DWARF_HPP
 
-#include <libpdb/types.hpp>
 #include <libpdb/detail/dwarf.hpp>
+#include <libpdb/registers.hpp>
+#include <libpdb/types.hpp>
 
 #include <filesystem>
 #include <memory>
@@ -251,7 +252,7 @@ private:
 
 struct SourceLocation
 {
-    const LineTable::File *file;
+    const LineTable::File* file;
     uint64_t line;
 };
 
@@ -349,6 +350,62 @@ private:
     Die m_die;
 };
 
+class Dwarf;
+class CallFrameInformation
+{
+public:
+    struct CommonInformationEntry
+    {
+        uint32_t length;
+        uint64_t codeAlignmentFactor;
+        int64_t dataAlignmentFactor;
+        bool fdeHasAugmentation;
+        uint8_t fdePointerEncoding;
+        Span<const std::byte> instructions;
+    };
+
+    struct FrameDescriptionEntry
+    {
+        uint32_t length;
+        const CommonInformationEntry* cie;
+        FileAddr initialLocation;
+        uint64_t addressRange;
+        Span<const std::byte> instruction;
+    };
+
+    struct EhHdr
+    {
+        const std::byte* start;
+        const std::byte* searchTable;
+        size_t count;
+        uint8_t encoding;
+        CallFrameInformation* parent;
+        const std::byte* operator[](FileAddr address) const;
+    };
+
+    CallFrameInformation()                                       = delete;
+    CallFrameInformation(const CallFrameInformation&)            = delete;
+    CallFrameInformation& operator=(const CallFrameInformation&) = delete;
+
+    CallFrameInformation(const Dwarf* dwarf, EhHdr hdr)
+        : m_dwarf(dwarf)
+        , m_ehHdr(hdr)
+    {
+        m_ehHdr.parent = this;
+    }
+
+    const Dwarf& dwarfInfo() const { return *m_dwarf; }
+
+    const CommonInformationEntry& getCie(FileOffset at) const;
+
+    Registers unwind(const Process &proc, FileAddr pc, Registers &regs) const;
+
+private:
+    const Dwarf* m_dwarf;
+    mutable std::unordered_map<uint32_t, CommonInformationEntry> m_cieMap;
+    EhHdr m_ehHdr;
+};
+
 class Dwarf
 {
 public:
@@ -368,6 +425,8 @@ public:
 
     std::vector<Die> inlineStackAtAddress(FileAddr address) const;
 
+    const CallFrameInformation& cfi() const { return *m_cfi; }
+
 private:
     void index() const;
     void indexDie(const Die& current) const;
@@ -384,6 +443,7 @@ private:
         const std::byte* pos;
     };
     mutable std::unordered_multimap<std::string, IndexEntry> m_functionIndex;
+    std::unique_ptr<CallFrameInformation> m_cfi;
 };
 
 } // namespace pdb

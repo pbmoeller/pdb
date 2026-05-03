@@ -44,7 +44,7 @@ std::unique_ptr<Target> Target::attach(pid_t pid)
 
 void Target::notifyStop(const StopReason& reason)
 {
-    m_stack.resetInlineHeight();
+    m_stack.unwind();
 }
 
 FileAddr Target::getPcFileAddress() const
@@ -129,9 +129,18 @@ StopReason Target::stepOut()
         return runUntilAddress(returnAddress);
     }
 
-    auto framePointer  = m_process->getRegisters().readByIdAs<uint64_t>(RegisterId::rbp);
-    auto returnAddress = m_process->readMemoryAs<uint64_t>(VirtAddr{framePointer + 8});
-    return runUntilAddress(VirtAddr{returnAddress});
+    auto& regs = stack.frames()[stack.currentFrameIndex() + 1].regs;
+    VirtAddr returnAddress{regs.readByIdAs<uint64_t>(RegisterId::rip)};
+
+    StopReason reason;
+    for(auto frames = stack.frames().size(); stack.frames().size() >= frames;) {
+        reason = runUntilAddress(returnAddress);
+        if(!reason.isBreakpoint() || m_process->getProgramCounter() != returnAddress) {
+            return reason;
+        }
+    }
+
+    return reason;
 }
 
 LineTable::Iterator Target::lineEntryAtPc() const

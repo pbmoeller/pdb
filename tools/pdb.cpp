@@ -227,19 +227,21 @@ void printStopReason(const pdb::Target& target, const pdb::StopReason& reason)
     std::cout << std::format("Process {} {}", target.getProcess().pid(), message) << std::endl;
 }
 
+void printCodeLocation(pdb::Target& target)
+{
+    if(target.getStack().hasFrames()) {
+        auto& frame = target.getStack().currentFrame();
+        printSource(frame.location.file->path, frame.location.line, 3);
+    } else {
+        printDisassembly(target.getProcess(), target.getProcess().getProgramCounter(), 5);
+    }
+}
+
 void handleStop(pdb::Target& target, pdb::StopReason reason)
 {
     printStopReason(target, reason);
     if(reason.reason == pdb::ProcessState::Stopped) {
-        if(target.getStack().inlineHeight() > 0) {
-            auto stack = target.getStack().inlineStackAtPc();
-            auto frame = stack[stack.size() - target.getStack().inlineHeight()];
-            printSource(frame.file().path, frame.line(), 3);
-        } else if(auto entry = target.lineEntryAtPc(); entry != pdb::LineTable::Iterator()) {
-            printSource(entry->fileEntry->path, entry->line, 3);
-        } else {
-            printDisassembly(target.getProcess(), target.getProcess().getProgramCounter(), 5);
-        }
+        printCodeLocation(target);
     }
 }
 
@@ -251,12 +253,14 @@ void printHelp(const std::vector<std::string>& args)
     catchpoint  - Commands for operating on catchpoints
     continue    - Resume the process
     disassemble - Disassemble machine code to assembly
+    down        - Select the stack frame below current one
     finish      - Step-out
     memory      - Operations on memory
     next        - Step-over
     register    - Commands for operating on registers
     step        - Step-in
     stepi       - Single instruction step
+    up          - Select the stack frame above current one
     watchpoint  - Commands for operating on watchpoints
 )";
     } else if(isPrefix(args[1], "register")) {
@@ -305,7 +309,26 @@ void printHelp(const std::vector<std::string>& args)
     }
 }
 
-void handleRegisterRead(pdb::Process& process, const std::vector<std::string>& args)
+void printBacktrace(const pdb::Target& target)
+{
+    auto& stack = target.getStack();
+    auto i      = 0;
+    for(auto& frame : stack.frames()) {
+        auto pc       = frame.backtraceReportAddress;
+        auto funcName = target.functionNameAtAddress(pc);
+
+        std::string message = i == stack.currentFrameIndex() ? "*" : " ";
+        message += std::format("[{}]: {:#x} {}", i++, pc.addr(), funcName);
+        if(frame.inlined) {
+            message += std::format(" [inlined] {}", *frame.funcDie.name());
+        }
+        std::cout << message << "\n";
+    }
+
+    std::cout.flush();
+}
+
+void handleRegisterRead(pdb::Target& target, const std::vector<std::string>& args)
 {
     auto format = [](auto t) {
         if constexpr(std::is_floating_point_v<decltype(t)>) {
@@ -317,21 +340,26 @@ void handleRegisterRead(pdb::Process& process, const std::vector<std::string>& a
         }
     };
 
+    auto& regs              = target.getStack().regs();
+    auto printRegisterValue = [&](auto info) {
+        if(regs.isUndefined(info.id)) {
+            std::cout << std::format("{}:\tundefined\n", info.name);
+        } else {
+            auto value = regs.read(info);
+            std::cout << std::format("{}:\t{}\n", info.name, std::visit(format, value));
+        }
+    };
+
     if(args.size() == 2 || (args.size() == 3 && args[2] == "all")) {
         for(auto& info : pdb::g_registerInfos) {
-            auto shouldPrint = (args.size() == 3 || info.type == pdb::RegisterType::GPR)
-                            && info.name != "orig_rax";
-            if(!shouldPrint) {
-                continue;
+            if(args.size() == 3 || info.type == pdb::RegisterType::GPR) {
+                printRegisterValue(info);
             }
-            auto value = process.getRegisters().read(info);
-            std::cout << std::format("{}:\t{}\n", info.name, std::visit(format, value));
         }
     } else if(args.size() == 3) {
         try {
-            auto info  = pdb::registerInfoByName(args[2]);
-            auto value = process.getRegisters().read(info);
-            std::cout << std::format("{}:\t{}\n", info.name, std::visit(format, value));
+            auto info = pdb::registerInfoByName(args[2]);
+            printRegisterValue(info);
         } catch(pdb::Error& err) {
             std::cerr << "No such register\n";
             return;
@@ -389,7 +417,7 @@ void handleRegisterWrite(pdb::Process& process, const std::vector<std::string>& 
     }
 }
 
-void handleRegisterCommand(pdb::Process& process, const std::vector<std::string>& args)
+void handleRegisterCommand(pdb::Target& target, const std::vector<std::string>& args)
 {
     if(args.size() < 2) {
         printHelp({"help", "register"});
@@ -397,9 +425,9 @@ void handleRegisterCommand(pdb::Process& process, const std::vector<std::string>
     }
 
     if(isPrefix(args[1], "read")) {
-        handleRegisterRead(process, args);
+        handleRegisterRead(target, args);
     } else if(isPrefix(args[1], "write")) {
-        handleRegisterWrite(process, args);
+        handleRegisterWrite(target.getProcess(), args);
     } else {
         printHelp(args);
     }
@@ -750,7 +778,7 @@ void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
     } else if(isPrefix(command, "help")) {
         printHelp(args);
     } else if(isPrefix(command, "register")) {
-        handleRegisterCommand(*process, args);
+        handleRegisterCommand(*target, args);
     } else if(isPrefix(command, "breakpoint")) {
         handleBreakpointCommand(*target, args);
     } else if(isPrefix(command, "next")) {
@@ -767,6 +795,14 @@ void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
         handleStop(*target, reason);
     } else if(isPrefix(command, "memory")) {
         handleMemoryCommand(*process, args);
+    } else if(isPrefix(command, "up")) {
+        target->getStack().up();
+        printCodeLocation(*target);
+    } else if(isPrefix(command, "down")) {
+        target->getStack().down();
+        printCodeLocation(*target);
+    } else if(isPrefix(command, "backtrace")) {
+        printBacktrace(*target);
     } else if(isPrefix(command, "disassemble")) {
         handleDisassembleCommand(*process, args);
     } else if(isPrefix(command, "watchpoint")) {

@@ -38,6 +38,10 @@ byte128 widen(const RegisterInfo& info, T t)
 
 Registers::Value Registers::read(const RegisterInfo& info) const
 {
+    if(isUndefined(info.id)) {
+        Error::send("Register is undefined");
+    }
+
     auto bytes = asBytes(m_data);
     if(info.format == RegisterFormat::UINT) {
         switch(info.size) {
@@ -63,7 +67,7 @@ Registers::Value Registers::read(const RegisterInfo& info) const
     }
 }
 
-void Registers::write(const RegisterInfo& info, Value value)
+void Registers::write(const RegisterInfo& info, Value value, bool commit)
 {
     auto bytes = asBytes(m_data);
 
@@ -80,11 +84,41 @@ void Registers::write(const RegisterInfo& info, Value value)
         },
         value);
 
-    if(info.type == RegisterType::FPR) {
-        m_proc->writeFprs(m_data.i387);
-    } else {
-        auto alignedOffset = info.offset & ~0b111;
-        m_proc->writeUserArea(alignedOffset, fromBytes<uint64_t>(bytes + alignedOffset));
+    if(commit) {
+        if(info.type == RegisterType::FPR) {
+            m_proc->writeFprs(m_data.i387);
+        } else {
+            auto alignedOffset = info.offset & ~0b111;
+            m_proc->writeUserArea(alignedOffset, fromBytes<uint64_t>(bytes + alignedOffset));
+        }
+    }
+}
+
+bool Registers::isUndefined(RegisterId id) const
+{
+    size_t canonicalOffset = registerInfoById(id).offset >> 1;
+    return std::find(begin(m_undefined), end(m_undefined), canonicalOffset) != end(m_undefined);
+}
+
+void Registers::undefine(RegisterId id)
+{
+    size_t canonicalOffset = registerInfoById(id).offset >> 1;
+    m_undefined.push_back(canonicalOffset);
+}
+
+void Registers::flush()
+{
+    m_proc->writeFprs(m_data.i387);
+    m_proc->writeGprs(m_data.regs);
+    auto info = registerInfoById(RegisterId::dr0);
+    for(auto i = 0; i < 8; ++i) {
+        if(i == 4 || i == 5) {
+            continue;
+        }
+        auto regOffset = info.offset + sizeof(uint64_t) * i;
+        auto ptr       = reinterpret_cast<std::byte*>(m_data.u_debugreg + i);
+        auto bytes     = fromBytes<uint64_t>(ptr);
+        m_proc->writeUserArea(regOffset, bytes);
     }
 }
 

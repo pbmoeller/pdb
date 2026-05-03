@@ -2,10 +2,12 @@
 #include <libpdb/dwarf.hpp>
 #include <libpdb/elf.hpp>
 #include <libpdb/error.hpp>
+#include <libpdb/process.hpp>
 #include <libpdb/types.hpp>
 
 #include <algorithm>
 #include <string_view>
+#include <variant>
 
 namespace pdb {
 
@@ -335,6 +337,388 @@ bool pathEndsIn(const std::filesystem::path& lhs, const std::filesystem::path& r
     }
     auto start = std::next(lhs.begin(), lhsSize - rhsSize);
     return std::equal(start, lhs.end(), rhs.begin());
+}
+
+uint64_t parseEhFramePointerWithBase(Cursor& cur, uint8_t encoding, uint64_t base)
+{
+    switch(encoding & 0x0F) {
+        case DW_EH_PE_absptr:
+            return base + cur.u64();
+        case DW_EH_PE_uleb128:
+            return base + cur.uleb128();
+        case DW_EH_PE_udata2:
+            return base + cur.u16();
+        case DW_EH_PE_udata4:
+            return base + cur.u32();
+        case DW_EH_PE_udata8:
+            return base + cur.u64();
+        case DW_EH_PE_sleb128:
+            return base + cur.sleb128();
+        case DW_EH_PE_sdata2:
+            return base + cur.s16();
+        case DW_EH_PE_sdata4:
+            return base + cur.s32();
+        case DW_EH_PE_sdata8:
+            return base + cur.s64();
+        default:
+            Error::send("Unknown eh_frame pointer encoding");
+    }
+}
+
+uint64_t parseEhFramePointer(const Elf& elf, Cursor& cur, uint8_t encoding, uint64_t pc,
+                             uint64_t textSectionStart, uint64_t dataSectionStart,
+                             uint64_t funcStart)
+{
+    uint64_t base = 0;
+    switch(encoding & 0x70) {
+        case DW_EH_PE_absptr:
+            break;
+        case DW_EH_PE_pcrel:
+            base = pc;
+            break;
+        case DW_EH_PE_textrel:
+            base = textSectionStart;
+            break;
+        case DW_EH_PE_datarel:
+            base = dataSectionStart;
+            break;
+        case DW_EH_PE_funcrel:
+            base = funcStart;
+            break;
+        default:
+            Error::send("Unknown eh_frame pointer encoding");
+    }
+    return parseEhFramePointerWithBase(cur, encoding, base);
+}
+
+CallFrameInformation::CommonInformationEntry parseCie(Cursor cur)
+{
+    auto start   = cur.position();
+    auto length  = cur.u32() + 4;
+    auto id      = cur.u32();
+    auto version = cur.u8();
+
+    if(!(version == 1 || version == 3 || version == 4)) {
+        Error::send("Invalid CIE version");
+    }
+
+    auto augmentation = cur.string();
+
+    if(!augmentation.empty() && augmentation[0] != 'z') {
+        Error::send("Invalid CIE augmentation");
+    }
+
+    if(version == 4) {
+        auto addressSize = cur.u8();
+        auto segmentSize = cur.u8();
+        if(addressSize != 8) {
+            Error::send("Invalid address size");
+        }
+        if(segmentSize != 0) {
+            Error::send("Invalid segment size");
+        }
+    }
+
+    auto codeAlignmentFactor   = cur.uleb128();
+    auto dataAlignmentFactor   = cur.sleb128();
+    auto returnAddressRegister = version == 1 ? cur.u8() : cur.uleb128();
+
+    uint8_t fdePointerEncoding = DW_EH_PE_udata8 | DW_EH_PE_absptr;
+    for(auto c : augmentation) {
+        switch(c) {
+            case 'z':
+                cur.uleb128();
+                break;
+            case 'R':
+                fdePointerEncoding = cur.u8();
+                break;
+            case 'L':
+                cur.u8();
+                break;
+            case 'P':
+            {
+                auto encoding = cur.u8();
+                (void)parseEhFramePointerWithBase(cur, encoding, 0);
+                break;
+            }
+            default:
+                Error::send("Invalid CIE augmentation");
+        }
+    }
+
+    Span<const std::byte> instructions = {cur.position(), start + length};
+    bool fdeHasAugmentation            = !augmentation.empty();
+    return {length,
+            codeAlignmentFactor,
+            dataAlignmentFactor,
+            fdeHasAugmentation,
+            fdePointerEncoding,
+            instructions};
+}
+
+CallFrameInformation::FrameDescriptionEntry parseFde(const CallFrameInformation& cfi, Cursor cur)
+{
+    auto start  = cur.position();
+    auto length = cur.u32() + 4;
+
+    auto elf           = cfi.dwarfInfo().elfFile();
+    auto currentOffset = elf->dataPointerAsFileOffset(cur.position());
+    FileOffset cieOffset{*elf, currentOffset.offset() - cur.u32()};
+    auto& cie = cfi.getCie(cieOffset);
+
+    currentOffset            = elf->dataPointerAsFileOffset(cur.position());
+    auto textSectionStart    = elf->getSectionStartAddress(".text").value_or(FileAddr{});
+    auto initialLocationAddr = parseEhFramePointer(
+        *elf, cur, cie.fdePointerEncoding, currentOffset.offset(), textSectionStart.addr(), 0, 0);
+    FileAddr initialLocation{*elf, initialLocationAddr};
+
+    auto addressRange = parseEhFramePointerWithBase(cur, cie.fdePointerEncoding, 0);
+
+    if(cie.fdeHasAugmentation) {
+        auto augmentationLength = cur.uleb128();
+        cur += augmentationLength;
+    }
+
+    Span<const std::byte> instructions = {cur.position(), start + length};
+    return {length, &cie, initialLocation, addressRange, instructions};
+}
+
+CallFrameInformation::EhHdr parseEhHdr(Dwarf& dwarf)
+{
+    auto elf              = dwarf.elfFile();
+    auto ehHdrStart       = *elf->getSectionStartAddress(".eh_frame_hdr");
+    auto textSectionStart = *elf->getSectionStartAddress(".text");
+
+    auto ehHdrData = elf->getSectionContents(".eh_frame_hdr");
+    Cursor cur(ehHdrData);
+
+    auto start         = cur.position();
+    auto version       = cur.u8();
+    auto ehFramePtrEnc = cur.u8();
+    auto fdeCountEnc   = cur.u8();
+    auto tableEnc      = cur.u8();
+    (void)parseEhFramePointerWithBase(cur, ehFramePtrEnc, 0);
+
+    auto fdeCount = parseEhFramePointerWithBase(cur, fdeCountEnc, 0);
+
+    auto searchTable = cur.position();
+    return {start, searchTable, fdeCount, tableEnc, nullptr};
+}
+
+size_t ehFramePointerEncodingSize(uint8_t encoding)
+{
+    switch(encoding & 0x7) {
+        case DW_EH_PE_absptr:
+            return 8;
+        case DW_EH_PE_udata2:
+            return 2;
+        case DW_EH_PE_udata4:
+            return 4;
+        case DW_EH_PE_udata8:
+            return 8;
+        default:
+            Error::send("Invalid pointer encoding");
+    }
+}
+
+std::unique_ptr<CallFrameInformation> parseCallFrameInformation(Dwarf& dwarf)
+{
+    auto ehHdr = parseEhHdr(dwarf);
+    return std::make_unique<CallFrameInformation>(&dwarf, ehHdr);
+}
+
+struct UndefinedRule
+{ };
+struct SameRule
+{ };
+struct OffsetRule
+{
+    int64_t offset;
+};
+struct ValOffsetRule
+{
+    int64_t offset;
+};
+struct RegisterRule
+{
+    uint32_t reg;
+};
+struct CfaRegisterRule
+{
+    uint32_t reg;
+    int64_t offset;
+};
+
+struct UnwindContext
+{
+    Cursor cur{{nullptr, nullptr}};
+    FileAddr location;
+    CfaRegisterRule cfaRule;
+
+    using Rule    = std::variant<UndefinedRule, SameRule, OffsetRule, ValOffsetRule, RegisterRule>;
+    using Ruleset = std::unordered_map<uint32_t, Rule>;
+    Ruleset cieRegisterRules;
+    Ruleset registerRules;
+    std::vector<std::pair<Ruleset, CfaRegisterRule>> ruleStack;
+};
+
+void executeCfiInstruction(const Elf& elf, const CallFrameInformation::FrameDescriptionEntry& fde,
+                           UnwindContext& ctx, FileAddr pc)
+{
+    auto& cie = *fde.cie;
+    auto& cur  = ctx.cur;
+
+    auto textSectionStart = *elf.getSectionStartAddress(".text");
+    auto pltStart         = elf.getSectionStartAddress(".got.plt").value_or(FileAddr{});
+
+    auto opcode         = cur.u8();
+    auto primaryOpcode  = opcode & 0xC0;
+    auto extendedOpcode = opcode & 0x3F;
+    if(primaryOpcode) {
+        switch(primaryOpcode) {
+            case DW_CFA_advance_loc:
+                ctx.location += extendedOpcode * cie.codeAlignmentFactor;
+                break;
+            case DW_CFA_offset:
+            {
+                auto offset = static_cast<int64_t>(cur.uleb128()) * cie.dataAlignmentFactor;
+                ctx.registerRules.emplace(extendedOpcode, OffsetRule{offset});
+                break;
+            }
+            case DW_CFA_restore:
+                ctx.registerRules.emplace(extendedOpcode, ctx.cieRegisterRules.at(extendedOpcode));
+                break;
+        }
+    } else if(extendedOpcode) {
+        switch(extendedOpcode) {
+            case DW_CFA_set_loc:
+            {
+                auto currentOffset = elf.dataPointerAsFileOffset(cur.position());
+                auto loc           = parseEhFramePointer(elf, cur, cie.fdePointerEncoding,
+                                                         currentOffset.offset(), textSectionStart.addr(),
+                                                         pltStart.addr(), fde.initialLocation.addr());
+                ctx.location       = FileAddr{elf, loc};
+                break;
+            }
+            case DW_CFA_advance_loc1:
+                ctx.location += cur.u8() * cie.codeAlignmentFactor;
+                break;
+            case DW_CFA_advance_loc2:
+                ctx.location += cur.u16() * cie.codeAlignmentFactor;
+                break;
+            case DW_CFA_advance_loc4:
+                ctx.location += cur.u32() * cie.codeAlignmentFactor;
+                break;
+            case DW_CFA_def_cfa:
+                ctx.cfaRule.reg    = cur.uleb128();
+                ctx.cfaRule.offset = cur.uleb128();
+                break;
+            case DW_CFA_def_cfa_sf:
+                ctx.cfaRule.reg    = cur.uleb128();
+                ctx.cfaRule.offset = cur.sleb128() * cie.dataAlignmentFactor;
+                break;
+            case DW_CFA_def_cfa_register:
+                ctx.cfaRule.reg = cur.uleb128();
+                break;
+            case DW_CFA_def_cfa_offset:
+                ctx.cfaRule.offset = cur.uleb128();
+                break;
+            case DW_CFA_def_cfa_offset_sf:
+                ctx.cfaRule.offset = cur.sleb128() * cie.dataAlignmentFactor;
+                break;
+            case DW_CFA_def_cfa_expression:
+                Error::send("DWARF expression not yet implemented");
+            case DW_CFA_undefined:
+                ctx.registerRules.emplace(cur.uleb128(), UndefinedRule{});
+                break;
+            case DW_CFA_same_value:
+                ctx.registerRules.emplace(cur.uleb128(), SameRule{});
+                break;
+            case DW_CFA_offset_extended:
+            {
+                auto reg    = cur.uleb128();
+                auto offset = static_cast<int64_t>(cur.uleb128()) * cie.dataAlignmentFactor;
+                ctx.registerRules.emplace(reg, OffsetRule{offset});
+                break;
+            }
+            case DW_CFA_offset_extended_sf:
+            {
+                auto reg    = cur.uleb128();
+                auto offset = cur.sleb128() * cie.dataAlignmentFactor;
+                ctx.registerRules.emplace(reg, OffsetRule{offset});
+                break;
+            }
+            case DW_CFA_val_offset:
+            {
+                auto reg    = cur.uleb128();
+                auto offset = static_cast<int64_t>(cur.uleb128()) * cie.dataAlignmentFactor;
+                ctx.registerRules.emplace(reg, ValOffsetRule{offset});
+                break;
+            }
+            case DW_CFA_val_offset_sf:
+            {
+                auto reg    = cur.uleb128();
+                auto offset = cur.sleb128() * cie.dataAlignmentFactor;
+                ctx.registerRules.emplace(reg, ValOffsetRule{offset});
+            }
+            case DW_CFA_register:
+            {
+                auto reg = cur.uleb128();
+                ctx.registerRules.emplace(reg, RegisterRule{static_cast<uint32_t>(cur.uleb128())});
+                break;
+            }
+            case DW_CFA_expression:
+                Error::send("DWARF expressions not yet implemented");
+            case DW_CFA_val_expression:
+                Error::send("DWARF expressions not yet implemented");
+            case DW_CFA_restore_extended:
+            {
+                auto reg = cur.uleb128();
+                ctx.registerRules.emplace(reg, ctx.cieRegisterRules.at(reg));
+                break;
+            }
+            case DW_CFA_remember_state:
+            {
+                ctx.ruleStack.push_back({ctx.registerRules, ctx.cfaRule});
+                break;
+            }
+            case DW_CFA_restore_state:
+                ctx.registerRules = ctx.ruleStack.back().first;
+                ctx.cfaRule       = ctx.ruleStack.back().second;
+                ctx.ruleStack.pop_back();
+                break;
+        }
+    }
+}
+
+Registers executeUnwindRules(UnwindContext& ctx, Registers& oldRegs, const Process& proc)
+{
+    auto unwoundRegs = oldRegs;
+    auto cfaRegInfo  = registerInfoByDwarf(ctx.cfaRule.reg);
+    auto cfa         = std::get<uint64_t>(oldRegs.read(cfaRegInfo)) + ctx.cfaRule.offset;
+    oldRegs.setCfa(VirtAddr{cfa});
+    unwoundRegs.writeById(RegisterId::rsp, {cfa}, false);
+
+    for(auto [reg, rule] : ctx.registerRules) {
+        auto regInfo = registerInfoByDwarf(reg);
+
+        if(auto undef = std::get_if<UndefinedRule>(&rule)) {
+            unwoundRegs.undefine(regInfo.id);
+        } else if(auto same = std::get_if<SameRule>(&rule)) {
+            // Do nothing
+        } else if(auto reg = std::get_if<RegisterRule>(&rule)) {
+            auto otherReg = registerInfoByDwarf(reg->reg);
+            unwoundRegs.write(regInfo, oldRegs.read(otherReg), false);
+        } else if(auto offset = std::get_if<OffsetRule>(&rule)) {
+            auto addr  = VirtAddr{cfa + offset->offset};
+            auto value = fromBytes<uint64_t>(proc.readMemory(addr, 8).data());
+            unwoundRegs.write(regInfo, {value}, false);
+        } else if(auto valOffset = std::get_if<ValOffsetRule>(&rule)) {
+            auto addr = cfa + valOffset->offset;
+            unwoundRegs.write(regInfo, {addr}, false);
+        }
+    }
+    return unwoundRegs;
 }
 
 } // namespace
@@ -894,10 +1278,93 @@ bool Die::ChildrenRange::Iterator::operator==(const Die::ChildrenRange::Iterator
     return m_die->abbrevEntry() == rhs->abbrevEntry() && m_die->next() == rhs->next();
 }
 
+const std::byte* CallFrameInformation::EhHdr::operator[](FileAddr address) const
+{
+    auto elf              = address.elfFile();
+    auto textSectionStart = *elf->getSectionStartAddress(".text");
+    auto encodingSize     = ehFramePointerEncodingSize(encoding);
+    auto rowSize          = encodingSize * 2;
+
+    size_t low  = 0;
+    size_t high = count - 1;
+    while(low <= high) {
+        size_t mid = (low + high) / 2;
+        Cursor cur({searchTable + mid * rowSize, searchTable + count * rowSize});
+        auto currentOffset = elf->dataPointerAsFileOffset(cur.position());
+        auto ehHdrOffset   = elf->dataPointerAsFileOffset(start);
+        auto entryAddress  = parseEhFramePointer(*elf, cur, encoding, currentOffset.offset(),
+                                                 textSectionStart.addr(), ehHdrOffset.offset(), 0);
+        if(entryAddress < address.addr()) {
+            low = mid + 1;
+        } else if(entryAddress > address.addr()) {
+            if(mid == 0) {
+                Error::send("Address not found in eh_hdr");
+            }
+            high = mid - 1;
+        } else {
+            high = mid;
+            break;
+        }
+    }
+
+    Cursor cur({searchTable + high * rowSize + encodingSize, searchTable + count * rowSize});
+    auto currentOffset = elf->dataPointerAsFileOffset(cur.position());
+    auto ehHdrOffset   = elf->dataPointerAsFileOffset(start);
+    auto fdeOffsetInt  = parseEhFramePointer(*elf, cur, encoding, currentOffset.offset(),
+                                             textSectionStart.addr(), ehHdrOffset.offset(), 0);
+    FileOffset fdeOffset{*elf, fdeOffsetInt};
+    return elf->fileOffsetAsDataPointer(fdeOffset);
+}
+
+const CallFrameInformation::CommonInformationEntry&
+CallFrameInformation::getCie(FileOffset at) const
+{
+    auto offset = at.offset();
+    if(m_cieMap.count(offset)) {
+        return m_cieMap.at(offset);
+    }
+
+    auto section = at.elfFile()->getSectionContents(".eh_frame");
+    Cursor cur({at.elfFile()->fileOffsetAsDataPointer(at), section.end()});
+    auto cie = parseCie(cur);
+    m_cieMap.emplace(offset, cie);
+    return m_cieMap.at(offset);
+}
+
+Registers CallFrameInformation::unwind(const Process& proc, FileAddr pc, Registers& regs) const
+{
+    auto fdeStart   = m_ehHdr[pc];
+    auto ehFrameEnd = m_dwarf->elfFile()->getSectionContents(".eh_frame").end();
+
+    Cursor cur({fdeStart, ehFrameEnd});
+    auto fde = parseFde(*this, cur);
+    if(pc < fde.initialLocation || pc >= fde.initialLocation + fde.addressRange) {
+        Error::send("No unwind information at pc");
+    }
+
+    UnwindContext ctx{};
+    ctx.cur = Cursor(fde.cie->instructions);
+
+    while(!ctx.cur.finished()) {
+        executeCfiInstruction(*m_dwarf->elfFile(), fde, ctx, pc);
+    }
+
+    ctx.cieRegisterRules = ctx.registerRules;
+    ctx.cur              = Cursor(fde.instruction);
+    ctx.location         = fde.initialLocation;
+
+    while(!ctx.cur.finished() && ctx.location <= pc) {
+        executeCfiInstruction(*m_dwarf->elfFile(), fde, ctx, pc);
+    }
+
+    return executeUnwindRules(ctx, regs, proc);
+}
+
 Dwarf::Dwarf(const Elf& parent)
     : m_elf(&parent)
 {
     m_compileUnits = parseCompileUnits(*this, parent);
+    m_cfi          = parseCallFrameInformation(*this);
 }
 
 const std::unordered_map<std::uint64_t, Abbrev>& Dwarf::getAbbrevTable(size_t offset)

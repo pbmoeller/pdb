@@ -52,6 +52,15 @@ public:
     Dwarf& getDwarf() { return *m_dwarf; }
     const Dwarf& getDwarf() const { return *m_dwarf; }
 
+    FileOffset dataPointerAsFileOffset(const std::byte* ptr) const
+    {
+        return FileOffset(*this, ptr - m_data);
+    }
+    const std::byte* fileOffsetAsDataPointer(FileOffset offset) const
+    {
+        return m_data + offset.offset();
+    }
+
 private:
     void parseSectionHeaders();
     void buildSectionMap();

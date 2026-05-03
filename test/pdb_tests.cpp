@@ -726,3 +726,23 @@ TEST_CASE("Source-level stepping", "[target]")
     REQUIRE(target->functionNameAtAddress(pc) == "main");
     close(devNull);
 }
+
+TEST_CASE("Stack unwinding", "[unwind]")
+{
+    auto target = pdb::Target::launch("targets/step");
+    auto& proc  = target->getProcess();
+
+    target->createFunctionBreakpoint("scratchEars").enable();
+    proc.resume();
+    proc.waitOnSignal();
+    target->stepIn();
+    target->stepIn();
+
+    std::vector<std::string_view> expectedNames = {"scratchEars", "petCat", "findHappiness",
+                                                   "main"};
+
+    auto frames = target->getStack().frames();
+    for(auto i = 0; i < frames.size(); ++i) {
+        REQUIRE(frames[i].funcDie.name().value() == expectedNames[i]);
+    }
+}
