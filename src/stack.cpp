@@ -40,7 +40,7 @@ void Stack::unwind()
         return;
     }
 
-    while(virtPc.addr() != 0 && elf == &m_target->getElf()) {
+    while(virtPc.addr() != 0 && elf) {
         auto& dwarf      = elf->getDwarf();
         auto inlineStack = dwarf.inlineStackAtAddress(filePc);
         if(inlineStack.empty()) {
@@ -55,7 +55,7 @@ void Stack::unwind()
         }
         regs   = dwarf.cfi().unwind(proc, filePc, m_frames.back().regs);
         virtPc = VirtAddr{regs.readByIdAs<uint64_t>(RegisterId::rip) - 1};
-        filePc = virtPc.toFileAddr(m_target->getElf());
+        filePc = virtPc.toFileAddr(m_target->getElves());
         elf    = filePc.elfFile();
     }
 }

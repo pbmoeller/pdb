@@ -75,29 +75,25 @@ void FunctionBreakpoint::resolve()
 
 void LineBreakpoint::resolve()
 {
-    auto& dwarf = m_target->getElf().getDwarf();
-    for(auto& cu : dwarf.compileUnits()) {
-        auto entries = cu->lines().getEntriesByLine(m_file, m_line);
-        for(auto entry : entries) {
-            auto& dwarf = entry->address.elfFile()->getDwarf();
-            auto stack  = dwarf.inlineStackAtAddress(entry->address);
+    auto entries = m_target->getLineEntriesByLine(m_file, m_line);
+    for(auto entry : entries) {
+        auto& dwarf = entry->address.elfFile()->getDwarf();
+        auto stack  = dwarf.inlineStackAtAddress(entry->address);
 
-            auto noInlineStack = stack.size() == 1;
-            auto shouldSkipPrologue =
-                noInlineStack
-                && (stack[0].contains(DW_AT_ranges) || stack[0].contains(DW_AT_low_pc))
-                && stack[0].lowPc() == entry->address;
-            if(shouldSkipPrologue) {
-                ++entry;
-            }
-            auto loadAddress = entry->address.toVirtAddr();
-            if(!m_breakpointSites.containsAddress(loadAddress)) {
-                auto& newSite = m_target->getProcess().createBreakpointSite(
-                    this, m_nextSiteId++, loadAddress, m_isHardware, m_isInternal);
-                m_breakpointSites.push(&newSite);
-                if(m_isEnabled) {
-                    newSite.enable();
-                }
+        auto noInlineStack = stack.size() == 1;
+        auto shouldSkipPrologue =
+            noInlineStack && (stack[0].contains(DW_AT_ranges) || stack[0].contains(DW_AT_low_pc))
+            && stack[0].lowPc() == entry->address;
+        if(shouldSkipPrologue) {
+            ++entry;
+        }
+        auto loadAddress = entry->address.toVirtAddr();
+        if(!m_breakpointSites.containsAddress(loadAddress)) {
+            auto& newSite = m_target->getProcess().createBreakpointSite(
+                this, m_nextSiteId++, loadAddress, m_isHardware, m_isInternal);
+            m_breakpointSites.push(&newSite);
+            if(m_isEnabled) {
+                newSite.enable();
             }
         }
     }

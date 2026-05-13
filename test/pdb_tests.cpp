@@ -695,18 +695,18 @@ TEST_CASE("Source-level stepping", "[target]")
     proc.waitOnSignal();
 
     auto pc = proc.getProgramCounter();
-    REQUIRE(target->functionNameAtAddress(pc) == "main");
+    REQUIRE(target->functionNameAtAddress(pc) == "step`main");
 
     target->stepOver();
 
     auto newPc = proc.getProgramCounter();
     REQUIRE(newPc != pc);
-    REQUIRE(target->functionNameAtAddress(pc) == "main");
+    REQUIRE(target->functionNameAtAddress(pc) == "step`main");
 
     target->stepIn();
 
     pc = proc.getProgramCounter();
-    REQUIRE(target->functionNameAtAddress(pc) == "findHappiness");
+    REQUIRE(target->functionNameAtAddress(pc) == "step`findHappiness");
     REQUIRE(target->getStack().inlineHeight() == 2);
 
     target->stepIn();
@@ -718,12 +718,12 @@ TEST_CASE("Source-level stepping", "[target]")
     target->stepOut();
     newPc = proc.getProgramCounter();
     REQUIRE(newPc != pc);
-    REQUIRE(target->functionNameAtAddress(pc) == "findHappiness");
+    REQUIRE(target->functionNameAtAddress(pc) == "step`findHappiness");
 
     target->stepOut();
 
     pc = proc.getProgramCounter();
-    REQUIRE(target->functionNameAtAddress(pc) == "main");
+    REQUIRE(target->functionNameAtAddress(pc) == "step`main");
     close(devNull);
 }
 
@@ -745,4 +745,21 @@ TEST_CASE("Stack unwinding", "[unwind]")
     for(auto i = 0; i < frames.size(); ++i) {
         REQUIRE(frames[i].funcDie.name().value() == expectedNames[i]);
     }
+}
+
+TEST_CASE("Shared library tracing works", "[dynlib]")
+{
+    auto devNull = open("/dev/null", O_WRONLY);
+    auto target  = pdb::Target::launch("targets/marshmallow", devNull);
+    auto& proc   = target->getProcess();
+
+    target->createFunctionBreakpoint("libmeowClientIsCute").enable();
+    proc.resume();
+    proc.waitOnSignal();
+
+    REQUIRE(target->getStack().frames().size() == 2);
+    REQUIRE(target->getStack().frames()[0].funcDie.name().value() == "libmeowClientIsCute");
+    REQUIRE(target->getStack().frames()[1].funcDie.name().value() == "main");
+    REQUIRE(target->getPcFileAddress().elfFile()->path().filename() == "libmeow.so");
+    close(devNull);
 }

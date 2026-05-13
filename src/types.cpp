@@ -14,6 +14,15 @@ FileAddr VirtAddr::toFileAddr(const Elf& obj) const
     return FileAddr{obj, m_addr - obj.loadBias().addr()};
 }
 
+FileAddr VirtAddr::toFileAddr(const ElfCollection& elves) const
+{
+    auto obj = elves.getElfContainingAddress(*this);
+    if(!obj) {
+        return FileAddr{};
+    }
+    return toFileAddr(*obj);
+}
+
 VirtAddr FileAddr::toVirtAddr() const
 {
     assert(m_elf && "VirtAddr called on null address");

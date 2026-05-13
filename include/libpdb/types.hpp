@@ -21,6 +21,7 @@ enum class StoppointMode
 
 class Elf;
 class FileAddr;
+class ElfCollection;
 
 class VirtAddr
 {
@@ -52,6 +53,7 @@ public:
     bool operator>=(const VirtAddr& other) const { return m_addr >= other.m_addr; }
 
     FileAddr toFileAddr(const Elf& obj) const;
+    FileAddr toFileAddr(const ElfCollection& elves) const;
 
 private:
     uint64_t m_addr{0};
@@ -118,18 +120,15 @@ class FileOffset
 {
 public:
     FileOffset() = default;
-    FileOffset(const Elf &obj, uint64_t off)
-        : m_elf(&obj), m_offset(off) {
-    }
-    uint64_t offset() const {
-        return m_offset;
-    }
-    const Elf* elfFile() const {
-        return m_elf;
-    }
+    FileOffset(const Elf& obj, uint64_t off)
+        : m_elf(&obj)
+        , m_offset(off)
+    { }
+    uint64_t offset() const { return m_offset; }
+    const Elf* elfFile() const { return m_elf; }
 
 private:
-    const Elf *m_elf{nullptr};
+    const Elf* m_elf{nullptr};
     uint64_t m_offset{0};
 };
 

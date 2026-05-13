@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <string>
 
 namespace pdb {
@@ -47,6 +48,15 @@ public:
         return !m_breakpointSites.getInRegion(low, high).empty();
     }
 
+    void installHitHandler(std::function<bool(void)> onHit) { m_onHit = std::move(onHit); }
+
+    bool notifyHit() const {
+        if(m_onHit) {
+            return m_onHit();
+        }
+        return false;
+    }
+
 protected:
     friend Target;
     Breakpoint(Target& target, bool isHardware = false, bool isInternal = false);
@@ -59,6 +69,7 @@ protected:
     bool m_isInternal{false};
     StoppointCollection<BreakpointSite, false> m_breakpointSites;
     BreakpointSite::IdType m_nextSiteId = 1;
+    std::function<bool(void)> m_onHit;
 };
 
 class FunctionBreakpoint : public Breakpoint

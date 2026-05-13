@@ -230,4 +230,37 @@ std::optional<const Elf64_Sym*> Elf::getSymbolContainingAddress(VirtAddr addr) c
     return getSymbolContainingAddress(addr.toFileAddr(*this));
 }
 
+///////////////////////////////////////////////////////////////////////////////////////////////////
+/// ElfCollection
+
+const Elf* ElfCollection::getElfContainingAddress(VirtAddr address) const
+{
+    for(auto& elf : m_elves) {
+        if(auto section = elf->getSectionContainingAddress(address); section) {
+            return elf.get();
+        }
+    }
+    return nullptr;
+}
+
+const Elf* ElfCollection::getElfByPath(std::filesystem::path path) const
+{
+    for(auto& elf : m_elves) {
+        if(elf->path() == path) {
+            return elf.get();
+        }
+    }
+    return nullptr;
+}
+
+const Elf* ElfCollection::getElfByFilename(std::string_view name) const
+{
+    for(auto& elf : m_elves) {
+        if(elf->path().filename() == name) {
+            return elf.get();
+        }
+    }
+    return nullptr;
+}
+
 } // namespace pdb

@@ -27,6 +27,20 @@ add_test_cpp_target(anti_debugger)
 add_test_cpp_target(overloaded)
 add_test_cpp_target(step)
 add_test_cpp_target(force_inline)
+add_test_cpp_target(marshmallow)
+add_library(meow SHARED 
+    "libmeow.cpp"
+)
+target_compile_options(meow
+    PRIVATE
+        -g -O0 
+        -fPIC 
+        -gdwarf-4
+)
+target_link_libraries(marshmallow 
+    PRIVATE
+        meow
+)
 
 add_executable(multi_cu
     "multi_cu.cpp"

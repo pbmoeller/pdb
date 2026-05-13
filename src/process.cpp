@@ -215,6 +215,15 @@ StopReason Process::waitOnSignal()
                && m_breakpointSites.containsAddress(instructionBegin)
                && m_breakpointSites.getByAddress(instructionBegin).isEnabled()) {
                 setProgramCounter(instructionBegin);
+                
+                auto &bp = m_breakpointSites.getByAddress(instructionBegin);
+                if(bp.m_parent) {
+                    bool shouldResatrt = bp.m_parent->notifyHit();
+                    if(shouldResatrt) {
+                        resume();
+                        return waitOnSignal();
+                    }
+                }
             } else if(reason.trapReason == TrapType::HardwareBreak) {
                 auto id = getCurrentHardwareStoppoint();
                 if(id.index() == 1) {

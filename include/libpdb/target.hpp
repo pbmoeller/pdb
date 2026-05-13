@@ -6,6 +6,8 @@
 #include <libpdb/process.hpp>
 #include <libpdb/stack.hpp>
 
+#include <link.h>
+
 #include <filesystem>
 #include <memory>
 
@@ -24,8 +26,6 @@ public:
 
     Process& getProcess() { return *m_process; }
     const Process& getProcess() const { return *m_process; }
-    Elf& getElf() { return *m_elf; }
-    const Elf& getElf() const { return *m_elf; }
     Stack& getStack() { return m_stack; }
     const Stack& getStack() const { return m_stack; }
 
@@ -59,17 +59,34 @@ public:
 
     std::string functionNameAtAddress(VirtAddr address) const;
 
+    std::optional<r_debug> readDynamicLinkerRendezvous() const;
+
+    ElfCollection& getElves() { return m_elves; }
+    const ElfCollection& getElves() const { return m_elves; }
+    Elf& getMainElf() { return *m_mainElf; }
+    const Elf& getMainElf() const { return *m_mainElf; }
+
+    std::vector<LineTable::Iterator> getLineEntriesByLine(std::filesystem::path path,
+                                                          std::size_t line) const;
+
 private:
     Target(std::unique_ptr<Process> proc, std::unique_ptr<Elf> obj)
         : m_process(std::move(proc))
-        , m_elf(std::move(obj))
         , m_stack(this)
-    { }
+        , m_mainElf(obj.get())
+    {
+        m_elves.push(std::move(obj));
+    }
+
+    void resolveDynamicLinkerRendezvous();
+    void reloadDynamicLibraries();
 
     std::unique_ptr<Process> m_process;
-    std::unique_ptr<Elf> m_elf;
+    ElfCollection m_elves;
+    Elf* m_mainElf;
     Stack m_stack;
     StoppointCollection<Breakpoint> m_breakpoints;
+    VirtAddr m_dynamicLinkerRendezvousAddress;
 };
 
 } // namespace pdb

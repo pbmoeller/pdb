@@ -91,6 +91,40 @@ private:
     std::unique_ptr<Dwarf> m_dwarf;
 };
 
+class ElfCollection
+{
+public:
+    void push(std::unique_ptr<Elf> elf) { m_elves.push_back(std::move(elf)); }
+
+    template<typename F>
+    void forEach(F f);
+    template<typename F>
+    void forEach(F f) const;
+
+    const Elf* getElfContainingAddress(VirtAddr address) const;
+    const Elf* getElfByPath(std::filesystem::path path) const;
+    const Elf* getElfByFilename(std::string_view name) const;
+
+private:
+    std::vector<std::unique_ptr<Elf>> m_elves;
+};
+
+template<typename F>
+void ElfCollection::forEach(F f)
+{
+    for(auto& elf : m_elves) {
+        f(*elf);
+    }
+}
+
+template<typename F>
+void ElfCollection::forEach(F f) const
+{
+    for(const auto& elf : m_elves) {
+        f(*elf);
+    }
+}
+
 } // namespace pdb
 
 #endif // LIBPDB_ELF_HPP
