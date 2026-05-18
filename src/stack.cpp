@@ -16,7 +16,7 @@ void Stack::resetInlineHeight()
 
 std::vector<Die> Stack::inlineStackAtPc() const
 {
-    auto pc = m_target->getPcFileAddress();
+    auto pc = m_target->getPcFileAddress(m_tid);
     if(!pc.elfFile()) {
         return {};
     }
@@ -28,10 +28,10 @@ void Stack::unwind()
     resetInlineHeight();
     m_currentFrame = m_inlineHeight;
 
-    auto virtPc = m_target->getProcess().getProgramCounter();
-    auto filePc = m_target->getPcFileAddress();
+    auto virtPc = m_target->getProcess().getProgramCounter(m_tid);
+    auto filePc = m_target->getPcFileAddress(m_tid);
     auto& proc  = m_target->getProcess();
-    auto regs   = proc.getRegisters();
+    auto regs   = proc.getRegisters(m_tid);
 
     m_frames.clear();
 
@@ -81,13 +81,13 @@ void Stack::createInlineStackFrames(const Registers& regs, const std::vector<Die
     for(auto it = inlineStack.rbegin() + 1; it != inlineStack.rend(); ++it) {
         auto inlinedPc = std::prev(it)->lowPc().toVirtAddr();
         m_frames.push_back(StackFrame{regs, inlinedPc, *it});
-        m_frames.back().inlined = std::next(it) != inlineStack.rend();
+        m_frames.back().inlined  = std::next(it) != inlineStack.rend();
         m_frames.back().location = std::prev(it)->location();
     }
 }
 
 void Stack::createBaseFrame(const Registers& regs, const std::vector<Die> inlineStack, FileAddr pc,
-                           bool inlined)
+                            bool inlined)
 {
     auto backtracePc = pc.toVirtAddr();
     auto lineyEntry  = pc.elfFile()->getDwarf().lineEntryAtAddress(pc);

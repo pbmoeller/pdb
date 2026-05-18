@@ -67,81 +67,98 @@ std::unique_ptr<Target> Target::attach(pid_t pid)
 
 void Target::notifyStop(const StopReason& reason)
 {
-    m_stack.unwind();
+    m_threads.at(reason.tid).frames.unwind();
 }
 
-FileAddr Target::getPcFileAddress() const
+FileAddr Target::getPcFileAddress(std::optional<pid_t> otid) const
 {
-    return m_process->getProgramCounter().toFileAddr(m_elves);
+    return m_process->getProgramCounter(otid).toFileAddr(m_elves);
 }
 
-StopReason Target::stepIn()
+StopReason Target::stepIn(std::optional<pid_t> otid)
 {
-    auto& stack = getStack();
+    auto tid     = otid.value_or(m_process->currentThread());
+    auto& stack  = getStack(tid);
+    auto& thread = m_threads.at(tid);
     if(stack.inlineHeight() > 0) {
         stack.simulateInlinedStepIn();
-        return StopReason(ProcessState::Stopped, SIGTRAP, TrapType::SingleStep);
+        StopReason reason(tid, ProcessState::Stopped, SIGTRAP, TrapType::SingleStep);
+        thread.state->reason = reason;
+        return reason;
     }
-    auto origLine = lineEntryAtPc();
+
+    auto origLine = lineEntryAtPc(tid);
     do {
-        auto reason = m_process->stepInstruction();
+        auto reason = m_process->stepInstruction(tid);
         if(!reason.isStep()) {
+            thread.state->reason = reason;
             return reason;
         }
-    } while((lineEntryAtPc() == origLine || lineEntryAtPc()->endSequence)
-            && lineEntryAtPc() != LineTable::Iterator{});
+    } while((lineEntryAtPc(tid) == origLine || lineEntryAtPc(tid)->endSequence)
+            && lineEntryAtPc(tid) != LineTable::Iterator{});
 
-    auto pc = getPcFileAddress();
+    auto pc = getPcFileAddress(tid);
     if(pc.elfFile() != nullptr) {
         auto& dwarf = pc.elfFile()->getDwarf();
         auto func   = dwarf.functionContainingAddress(pc);
         if(func && func->lowPc() == pc) {
-            auto line = lineEntryAtPc();
+            auto line = lineEntryAtPc(tid);
             if(line != LineTable::Iterator{}) {
                 ++line;
-                return runUntilAddress(line->address.toVirtAddr());
+                return runUntilAddress(line->address.toVirtAddr(), tid);
             }
         }
     }
-    return StopReason(ProcessState::Stopped, SIGTRAP, TrapType::SingleStep);
+
+    StopReason reason(tid, ProcessState::Stopped, SIGTRAP, TrapType::SingleStep);
+    thread.state->reason = reason;
+    return reason;
 }
 
-StopReason Target::stepOver()
+StopReason Target::stepOver(std::optional<pid_t> otid)
 {
-    auto origLine = lineEntryAtPc();
+    auto tid      = otid.value_or(m_process->currentThread());
+    auto& thread  = m_threads.at(tid);
+    auto& stack   = getStack(tid);
+    auto origLine = lineEntryAtPc(tid);
+
     Disassembler disas(*m_process);
     StopReason reason;
-    auto& stack = getStack();
     do {
         auto inlineStack          = stack.inlineStackAtPc();
         auto atStartOfInlineFrame = stack.inlineHeight() > 0;
         if(atStartOfInlineFrame) {
             auto frameToSkip   = inlineStack[inlineStack.size() - stack.inlineHeight()];
             auto returnAddress = frameToSkip.highPc().toVirtAddr();
-            reason             = runUntilAddress(returnAddress);
-            if(!reason.isStep() || m_process->getProgramCounter() != returnAddress) {
+            reason             = runUntilAddress(returnAddress, tid);
+            if(!reason.isStep() || m_process->getProgramCounter(tid) != returnAddress) {
+                thread.state->reason = reason;
                 return reason;
             }
-        } else if(auto instructions = disas.disassemble(2, m_process->getProgramCounter());
+        } else if(auto instructions = disas.disassemble(2, m_process->getProgramCounter(tid));
                   instructions[0].text.rfind("call") == 0) {
-            reason = runUntilAddress(instructions[1].address);
-            if(!reason.isStep() || m_process->getProgramCounter() != instructions[1].address) {
+            reason = runUntilAddress(instructions[1].address, tid);
+            if(!reason.isStep() || m_process->getProgramCounter(tid) != instructions[1].address) {
+                thread.state->reason = reason;
                 return reason;
             }
         } else {
-            reason = m_process->stepInstruction();
+            reason = m_process->stepInstruction(tid);
             if(!reason.isStep()) {
+                thread.state->reason = reason;
                 return reason;
             }
         }
-    } while((lineEntryAtPc() == origLine || lineEntryAtPc()->endSequence)
-            && lineEntryAtPc() != LineTable::Iterator{});
+    } while((lineEntryAtPc(tid) == origLine || lineEntryAtPc(tid)->endSequence)
+            && lineEntryAtPc(tid) != LineTable::Iterator{});
+    thread.state->reason = reason;
     return reason;
 }
 
-StopReason Target::stepOut()
+StopReason Target::stepOut(std::optional<pid_t> otid)
 {
-    auto& stack          = getStack();
+    auto tid             = otid.value_or(m_process->currentThread());
+    auto& stack          = getStack(tid);
     auto inlineStack     = stack.inlineStackAtPc();
     auto hasInlineFrames = inlineStack.size() > 1;
     auto atInlineFrame   = stack.inlineHeight() < inlineStack.size() - 1;
@@ -149,7 +166,7 @@ StopReason Target::stepOut()
     if(hasInlineFrames && atInlineFrame) {
         auto currentFrame  = inlineStack[inlineStack.size() - stack.inlineHeight() - 1];
         auto returnAddress = currentFrame.highPc().toVirtAddr();
-        return runUntilAddress(returnAddress);
+        return runUntilAddress(returnAddress, tid);
     }
 
     auto& regs = stack.frames()[stack.currentFrameIndex() + 1].regs;
@@ -157,7 +174,7 @@ StopReason Target::stepOut()
 
     StopReason reason;
     for(auto frames = stack.frames().size(); stack.frames().size() >= frames;) {
-        reason = runUntilAddress(returnAddress);
+        reason = runUntilAddress(returnAddress, tid);
         if(!reason.isBreakpoint() || m_process->getProgramCounter() != returnAddress) {
             return reason;
         }
@@ -166,9 +183,9 @@ StopReason Target::stepOut()
     return reason;
 }
 
-LineTable::Iterator Target::lineEntryAtPc() const
+LineTable::Iterator Target::lineEntryAtPc(std::optional<pid_t> otid) const
 {
-    auto pc = getPcFileAddress();
+    auto pc = getPcFileAddress(otid);
     if(!pc.elfFile()) {
         return LineTable::Iterator();
     }
@@ -179,23 +196,27 @@ LineTable::Iterator Target::lineEntryAtPc() const
     return cu->lines().getEntryByAddress(pc);
 }
 
-StopReason Target::runUntilAddress(VirtAddr address)
+StopReason Target::runUntilAddress(VirtAddr address, std::optional<pid_t> otid)
 {
+    auto tid    = otid.value_or(m_process->currentThread());
+    auto& stack = getStack(tid);
+
     BreakpointSite* breakpointToRemove = nullptr;
     if(!m_process->breakpointSites().containsAddress(address)) {
         breakpointToRemove = &m_process->createBreakpointSite(address, false, true);
         breakpointToRemove->enable();
     }
 
-    m_process->resume();
-    auto reason = m_process->waitOnSignal();
-    if(reason.isBreakpoint() && m_process->getProgramCounter() == address) {
+    m_process->resume(tid);
+    auto reason = m_process->waitOnSignal(tid);
+    if(reason.isBreakpoint() && m_process->getProgramCounter(tid) == address) {
         reason.trapReason = TrapType::SingleStep;
     }
 
     if(breakpointToRemove) {
         m_process->breakpointSites().removeByAddress(breakpointToRemove->address());
     }
+    m_threads.at(tid).state->reason = reason;
     return reason;
 }
 
@@ -278,6 +299,17 @@ std::vector<LineTable::Iterator> Target::getLineEntriesByLine(std::filesystem::p
         }
     });
     return entries;
+}
+
+void Target::notifyThreadLifecycleEvent(const StopReason& reason)
+{
+    auto tid = reason.tid;
+    if(reason.reason == ProcessState::Stopped) {
+        auto& state = m_process->threadStates()[tid];
+        m_threads.emplace(tid, Thread{&state, Stack{this, tid}});
+    } else {
+        m_threads.erase(tid);
+    }
 }
 
 void Target::resolveDynamicLinkerRendezvous()

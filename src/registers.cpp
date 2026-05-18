@@ -86,10 +86,10 @@ void Registers::write(const RegisterInfo& info, Value value, bool commit)
 
     if(commit) {
         if(info.type == RegisterType::FPR) {
-            m_proc->writeFprs(m_data.i387);
+            m_proc->writeFprs(m_data.i387, m_tid);
         } else {
             auto alignedOffset = info.offset & ~0b111;
-            m_proc->writeUserArea(alignedOffset, fromBytes<uint64_t>(bytes + alignedOffset));
+            m_proc->writeUserArea(alignedOffset, fromBytes<uint64_t>(bytes + alignedOffset), m_tid);
         }
     }
 }
@@ -108,8 +108,8 @@ void Registers::undefine(RegisterId id)
 
 void Registers::flush()
 {
-    m_proc->writeFprs(m_data.i387);
-    m_proc->writeGprs(m_data.regs);
+    m_proc->writeFprs(m_data.i387, m_tid);
+    m_proc->writeGprs(m_data.regs, m_tid);
     auto info = registerInfoById(RegisterId::dr0);
     for(auto i = 0; i < 8; ++i) {
         if(i == 4 || i == 5) {
@@ -118,7 +118,7 @@ void Registers::flush()
         auto regOffset = info.offset + sizeof(uint64_t) * i;
         auto ptr       = reinterpret_cast<std::byte*>(m_data.u_debugreg + i);
         auto bytes     = fromBytes<uint64_t>(ptr);
-        m_proc->writeUserArea(regOffset, bytes);
+        m_proc->writeUserArea(regOffset, bytes, m_tid);
     }
 }
 

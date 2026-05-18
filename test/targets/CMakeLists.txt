@@ -28,6 +28,8 @@ add_test_cpp_target(overloaded)
 add_test_cpp_target(step)
 add_test_cpp_target(force_inline)
 add_test_cpp_target(marshmallow)
+add_test_cpp_target(multi_threaded)
+
 add_library(meow SHARED 
     "libmeow.cpp"
 )
@@ -40,6 +42,11 @@ target_compile_options(meow
 target_link_libraries(marshmallow 
     PRIVATE
         meow
+)
+
+target_link_libraries(multi_threaded 
+    PRIVATE
+        pthread
 )
 
 add_executable(multi_cu

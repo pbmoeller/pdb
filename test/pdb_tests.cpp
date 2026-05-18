@@ -17,6 +17,7 @@
 
 #include <fstream>
 #include <regex>
+#include <set>
 #include <string>
 
 namespace {
@@ -761,5 +762,33 @@ TEST_CASE("Shared library tracing works", "[dynlib]")
     REQUIRE(target->getStack().frames()[0].funcDie.name().value() == "libmeowClientIsCute");
     REQUIRE(target->getStack().frames()[1].funcDie.name().value() == "main");
     REQUIRE(target->getPcFileAddress().elfFile()->path().filename() == "libmeow.so");
+    close(devNull);
+}
+
+TEST_CASE("Multi-threading works", "[threads]")
+{
+    auto devNull = open("/dev/null", O_WRONLY);
+    auto target  = pdb::Target::launch("targets/multi_threaded", devNull);
+    auto& proc   = target->getProcess();
+
+    target->createFunctionBreakpoint("sayHi").enable();
+
+    std::set<pid_t> tids;
+    pdb::StopReason reason;
+    do {
+        proc.resumeAllThreads();
+        reason = proc.waitOnSignal();
+        for(auto& [tid, thread] : proc.threadStates()) {
+            if(thread.reason.reason == pdb::ProcessState::Stopped && tid != proc.pid()) {
+                tids.insert(tid);
+            }
+        }
+    } while(tids.size() < 10);
+
+    REQUIRE(tids.size() == 10);
+
+    proc.resumeAllThreads();
+    reason = proc.waitOnSignal();
+    REQUIRE(reason.reason == pdb::ProcessState::Exited);
     close(devNull);
 }

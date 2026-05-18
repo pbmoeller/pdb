@@ -25,11 +25,13 @@ public:
     void write(const RegisterInfo& info, Value value, bool commit = true);
 
     template<typename T>
-    T readByIdAs(RegisterId id) const {
+    T readByIdAs(RegisterId id) const
+    {
         return std::get<T>(read(registerInfoById(id)));
     }
 
-    void writeById(RegisterId id, Value value, bool commit = true) {
+    void writeById(RegisterId id, Value value, bool commit = true)
+    {
         write(registerInfoById(id), value, commit);
     }
 
@@ -42,8 +44,9 @@ public:
 
 private:
     friend Process;
-    Registers(Process& proc)
+    Registers(Process& proc, pid_t tid)
         : m_proc(&proc)
+        , m_tid(tid)
     { }
 
 private:
@@ -51,6 +54,7 @@ private:
     Process* m_proc;
     std::vector<size_t> m_undefined;
     VirtAddr m_cfa;
+    pid_t m_tid;
 };
 
 } // namespace pdb

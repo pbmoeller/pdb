@@ -28,8 +28,8 @@ void exitWithPerror(Pipe& channel, std::string const& prefix)
 
 void setPtraceOptions(pid_t pid)
 {
-    if(ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD) < 0) {
-        pdb::Error::sendErrno("Failed to set TRACESYSGOOD option");
+    if(ptrace(PTRACE_SETOPTIONS, pid, nullptr, PTRACE_O_TRACESYSGOOD | PTRACE_O_TRACECLONE) < 0) {
+        pdb::Error::sendErrno("Failed to set TRACESYSGOOD and TRACECLONE option");
     }
 }
 
@@ -73,8 +73,13 @@ int findFreeStoppointRegister(uint64_t controlRegister)
 
 } // namespace
 
-StopReason::StopReason(int waitStatus)
+StopReason::StopReason(pid_t tid, int waitStatus)
+    : tid(tid)
 {
+    if((waitStatus >> 8) == (SIGTRAP | (PTRACE_EVENT_CLONE << 8))) {
+        trapReason = TrapType::Clone;
+    }
+
     if(WIFEXITED(waitStatus)) {
         reason = ProcessState::Exited;
         info   = WEXITSTATUS(waitStatus);
@@ -170,112 +175,111 @@ std::unique_ptr<Process> Process::attach(pid_t pid)
     return proc;
 }
 
-void Process::resume()
+void Process::resume(std::optional<pid_t> otid)
 {
-    auto pc = getProgramCounter();
-    if(breakpointSites().enabledStoppointAtAddress(pc)) {
-        auto& bp = m_breakpointSites.getByAddress(pc);
-        bp.disable();
-        if(ptrace(PTRACE_SINGLESTEP, m_pid, nullptr, nullptr) < 0) {
-            Error::sendErrno("Failed to single step");
-        }
-        int waitStatus;
-        if(waitpid(m_pid, &waitStatus, 0) < 0) {
-            Error::sendErrno("waitpid failed");
-        }
-        bp.enable();
-    }
-
-    auto request = m_syscallCatchPolicy.getMode() == SyscallCatchPolicy::Mode::None
-                     ? PTRACE_CONT
-                     : PTRACE_SYSCALL;
-    if(ptrace(request, m_pid, nullptr, nullptr) < 0) {
-        Error::sendErrno("Could not resume");
-    }
-    m_state = ProcessState::Running;
+    auto tid = otid.value_or(m_currentThread);
+    stepOverBreakpoint(tid);
+    sendContinue(tid);
 }
 
-StopReason Process::waitOnSignal()
+StopReason Process::waitOnSignal(pid_t toAwait)
 {
-    int waitStatus = 0;
-    int options    = 0;
-    if(waitpid(m_pid, &waitStatus, options) < 0) {
+    int waitStatus;
+    int options    = __WALL;
+    pid_t tid;
+    if((tid = waitpid(toAwait, &waitStatus, options)) < 0) {
         Error::sendErrno("waitpid failed");
     }
-    StopReason reason(waitStatus);
-    m_state = reason.reason;
 
-    if(m_isAttached && m_state == ProcessState::Stopped) {
-        readAllRegisters();
-        augmentStopReason(reason);
-        auto instructionBegin = getProgramCounter();
-        instructionBegin -= 1;
-        if(reason.info == SIGTRAP) {
-            if(reason.trapReason == TrapType::SoftwareBreak
-               && m_breakpointSites.containsAddress(instructionBegin)
-               && m_breakpointSites.getByAddress(instructionBegin).isEnabled()) {
-                setProgramCounter(instructionBegin);
-                
-                auto &bp = m_breakpointSites.getByAddress(instructionBegin);
-                if(bp.m_parent) {
-                    bool shouldResatrt = bp.m_parent->notifyHit();
-                    if(shouldResatrt) {
-                        resume();
-                        return waitOnSignal();
-                    }
-                }
-            } else if(reason.trapReason == TrapType::HardwareBreak) {
-                auto id = getCurrentHardwareStoppoint();
-                if(id.index() == 1) {
-                    m_watchpoints.getById(std::get<1>(id)).updateData();
-                }
-            } else if(reason.trapReason == TrapType::Syscall) {
-                reason = maybeResumeFromSyscall(reason);
-            }
-        }
-        if(m_target) {
-            m_target->notifyStop(reason);
+    StopReason reason(tid, waitStatus);
+    auto finalReason = handleSignal(reason, true);
+    if(!finalReason) {
+        resume(tid);
+        return waitOnSignal(toAwait);
+    }
+
+    reason        = *finalReason;
+    auto& thread  = m_threads.at(tid);
+    thread.reason = reason;
+    thread.state  = reason.reason;
+
+    if(reason.reason == ProcessState::Exited || reason.reason == ProcessState::Terminated) {
+        reportThreadLifecycleEvent(reason);
+        if(tid == m_pid) {
+            m_state = reason.reason;
+            return reason;
+        } else {
+            return waitOnSignal(-1);
         }
     }
 
+    stopRunningThreads();
+    reason          = cleanupExitedThreads(tid).value_or(reason);
+    m_state         = reason.reason;
+    m_currentThread = tid;
     return reason;
 }
 
-void Process::writeUserArea(size_t offset, uint64_t data)
+Registers& Process::getRegisters(std::optional<pid_t> otid)
 {
-    if(ptrace(PTRACE_POKEUSER, m_pid, offset, data)) {
+    auto tid = otid.value_or(m_currentThread);
+    return m_threads.at(tid).regs;
+}
+
+const Registers& Process::getRegisters(std::optional<pid_t> otid) const
+{
+    return const_cast<Process*>(this)->getRegisters(otid);
+}
+
+void Process::writeUserArea(size_t offset, uint64_t data, std::optional<pid_t> otid)
+{
+    auto tid = otid.value_or(m_currentThread);
+    if(ptrace(PTRACE_POKEUSER, tid, offset, data) < 0) {
         Error::sendErrno("Could not write to user data.");
     }
 }
 
-void Process::writeFprs(const user_fpregs_struct& fprs)
+void Process::writeFprs(const user_fpregs_struct& fprs, std::optional<pid_t> otid)
 {
-    if(ptrace(PTRACE_SETFPREGS, m_pid, nullptr, &fprs) < 0) {
+    auto tid = otid.value_or(m_currentThread);
+    if(ptrace(PTRACE_SETFPREGS, tid, nullptr, &fprs) < 0) {
         Error::sendErrno("Could not write floating point registers");
     }
 }
 
-void Process::writeGprs(const user_regs_struct& gprs)
+void Process::writeGprs(const user_regs_struct& gprs, std::optional<pid_t> otid)
 {
-    if(ptrace(PTRACE_SETREGS, m_pid, nullptr, &gprs) < 0) {
+    auto tid = otid.value_or(m_currentThread);
+    if(ptrace(PTRACE_SETREGS, tid, nullptr, &gprs) < 0) {
         Error::sendErrno("Could not write general purpose registers");
     }
 }
 
-StopReason Process::stepInstruction()
+VirtAddr Process::getProgramCounter(std::optional<pid_t> otid) const
 {
+    return VirtAddr{getRegisters(otid).readByIdAs<uint64_t>(RegisterId::rip)};
+}
+
+void Process::setProgramCounter(VirtAddr address, std::optional<pid_t> otid)
+{
+    getRegisters(otid).writeById(RegisterId::rip, address.addr());
+}
+
+StopReason Process::stepInstruction(std::optional<pid_t> otid)
+{
+    auto tid = otid.value_or(m_currentThread);
     std::optional<BreakpointSite*> toReenable;
-    auto pc = getProgramCounter();
+    auto pc = getProgramCounter(tid);
     if(m_breakpointSites.enabledStoppointAtAddress(pc)) {
         auto& bp = m_breakpointSites.getByAddress(pc);
         bp.disable();
         toReenable = &bp;
     }
-
-    if(ptrace(PTRACE_SINGLESTEP, m_pid, nullptr, nullptr) < 0) {
+    swallowPendingSigstop(tid);
+    if(ptrace(PTRACE_SINGLESTEP, tid, nullptr, nullptr) < 0) {
         Error::sendErrno("Could not single step");
     }
-    auto reason = waitOnSignal();
+    auto reason = waitOnSignal(tid);
 
     if(toReenable) {
         toReenable.value()->enable();
@@ -371,6 +375,15 @@ void Process::clearHardwareStoppoint(int index)
     auto clearMask = (0b11 << (index * 2)) | (0b1111 << (index * 4 + 16));
     auto masked    = control & ~clearMask;
     getRegisters().writeById(RegisterId::dr7, masked);
+
+    for(auto& [tid, _] : m_threads) {
+        if(tid == m_currentThread) {
+            continue;
+        }
+        auto& otherRegs = getRegisters(tid);
+        otherRegs.writeById(static_cast<RegisterId>(id), 0);
+        otherRegs.writeById(RegisterId::dr7, masked);
+    }
 }
 
 int Process::setWatchpoint(Watchpoint::IdType id, VirtAddr address, StoppointMode mode, size_t size)
@@ -388,9 +401,9 @@ Watchpoint& Process::createWatchpoint(VirtAddr address, StoppointMode mode, size
 }
 
 std::variant<BreakpointSite::IdType, Watchpoint::IdType>
-Process::getCurrentHardwareStoppoint() const
+Process::getCurrentHardwareStoppoint(std::optional<pid_t> otid) const
 {
-    auto& regs  = getRegisters();
+    auto& regs  = getRegisters(otid);
     auto status = regs.readByIdAs<uint64_t>(RegisterId::dr6);
     auto index  = __builtin_ctzll(status);
 
@@ -407,33 +420,34 @@ Process::getCurrentHardwareStoppoint() const
     }
 }
 
-StopReason Process::maybeResumeFromSyscall(const StopReason& reason)
+bool Process::shouldResumeFromSyscall(const StopReason& reason)
 {
     if(m_syscallCatchPolicy.getMode() == SyscallCatchPolicy::Mode::Some) {
         auto& toCatch = m_syscallCatchPolicy.getToCatch();
         auto found    = std::find(std::begin(toCatch), std::end(toCatch), reason.syscallInfo->id);
 
         if(found == std::end(toCatch)) {
-            resume();
-            return waitOnSignal();
+            return true;
         }
     }
-    return reason;
+    return false;
 }
 
 Process::Process(pid_t pid, bool terminateOnEnd, bool isAttached)
     : m_pid(pid)
     , m_terminateOnEnd(terminateOnEnd)
     , m_isAttached(isAttached)
-    , m_registers(new Registers(*this))
-{ }
-
-void Process::readAllRegisters()
+    , m_currentThread(pid)
 {
-    if(ptrace(PTRACE_GETREGS, m_pid, nullptr, &getRegisters().m_data.regs) < 0) {
+    populateExistingThreads();
+}
+
+void Process::readAllRegisters(pid_t tid)
+{
+    if(ptrace(PTRACE_GETREGS, tid, nullptr, &getRegisters(tid).m_data.regs) < 0) {
         Error::sendErrno("ptrace GETREGS failed. Could not read GPR registers");
     }
-    if(ptrace(PTRACE_GETFPREGS, m_pid, nullptr, &getRegisters().m_data.i387) < 0) {
+    if(ptrace(PTRACE_GETFPREGS, tid, nullptr, &getRegisters(tid).m_data.i387) < 0) {
         Error::sendErrno("ptrace GETFPREGS failed. Could not read FPR registers");
     }
     for(int i = 0; i < 8; ++i) {
@@ -441,11 +455,11 @@ void Process::readAllRegisters()
         auto info = registerInfoById(static_cast<RegisterId>(id));
 
         errno        = 0;
-        int64_t data = ptrace(PTRACE_PEEKUSER, m_pid, info.offset, nullptr);
+        int64_t data = ptrace(PTRACE_PEEKUSER, tid, info.offset, nullptr);
         if(errno != 0) {
             Error::sendErrno("Could not read debug register");
         }
-        getRegisters().m_data.u_debugreg[i] = data;
+        getRegisters(tid).m_data.u_debugreg[i] = data;
     }
 }
 
@@ -465,20 +479,30 @@ int Process::setHardwareStoppoint(VirtAddr address, StoppointMode mode, size_t s
     auto modeBits  = (modeFlag << (freeSpace * 4 + 16));
     auto sizeBits  = (sizeFlag << (freeSpace * 4 + 18));
 
-    auto clearMask = (0b11 << (freeSpace * 2)) || (0b1111 << (freeSpace * 4 + 16));
+    auto clearMask = (0b11 << (freeSpace * 2)) | (0b1111 << (freeSpace * 4 + 16));
     auto masked    = control & ~clearMask;
 
     masked |= enableBit | modeBits | sizeBits;
 
     regs.writeById(RegisterId::dr7, masked);
 
+    for(auto& [tid, _] : m_threads) {
+        if(tid == m_currentThread) {
+            continue;
+        }
+        auto& otherRegs = getRegisters(tid);
+        otherRegs.writeById(static_cast<RegisterId>(id), address.addr());
+        otherRegs.writeById(RegisterId::dr7, masked);
+    }
+
     return freeSpace;
 }
 
 void Process::augmentStopReason(StopReason& reason)
 {
+    auto tid = reason.tid;
     siginfo_t info;
-    if(ptrace(PTRACE_GETSIGINFO, m_pid, nullptr, &info) < 0) {
+    if(ptrace(PTRACE_GETSIGINFO, tid, nullptr, &info) < 0) {
         Error::sendErrno("Failed to get signal info");
     }
 
@@ -541,6 +565,180 @@ std::unordered_map<int, uint64_t> Process::getAuxv() const
         ret[id] = value;
     }
     return ret;
+}
+
+void Process::populateExistingThreads()
+{
+    auto path = "/proc/" + std::to_string(m_pid) + "/task";
+    for(auto& entry : std::filesystem::directory_iterator(path)) {
+        auto tid = std::stoi(entry.path().filename().string());
+        m_threads.emplace(tid, ThreadState{tid, Registers(*this, tid)});
+    }
+}
+
+void Process::stopRunningThreads()
+{
+    for(auto& [tid, thread] : m_threads) {
+        if(thread.state == ProcessState::Running) {
+            if(!thread.pendingSigStop) {
+                tgkill(m_pid, tid, SIGSTOP);
+            }
+
+            int waitStatus;
+            waitpid(tid, &waitStatus, 0);
+
+            StopReason threadReason(tid, waitStatus);
+            if(threadReason.reason == ProcessState::Stopped) {
+                if(threadReason.info != SIGSTOP) {
+                    thread.pendingSigStop = true;
+                } else if(thread.pendingSigStop) {
+                    thread.pendingSigStop = false;
+                }
+            }
+
+            threadReason             = handleSignal(threadReason, false).value_or(threadReason);
+            m_threads.at(tid).reason = threadReason;
+            m_threads.at(tid).state  = threadReason.reason;
+        }
+    }
+}
+
+void Process::resumeAllThreads()
+{
+    for(auto& [tid, _] : m_threads) {
+        stepOverBreakpoint(tid);
+    }
+    for(auto& [tid, _] : m_threads) {
+        sendContinue(tid);
+    }
+}
+
+std::optional<StopReason> Process::cleanupExitedThreads(pid_t mainStopTid)
+{
+    std::vector<pid_t> toRemove;
+    std::optional<StopReason> toReport;
+    for(auto& [tid, thread] : m_threads) {
+        if(tid != mainStopTid
+           && (thread.state == ProcessState::Exited || thread.state == ProcessState::Terminated)) {
+            reportThreadLifecycleEvent(thread.reason);
+            toRemove.push_back(tid);
+            if(tid == m_pid) {
+                toReport = thread.reason;
+            }
+        }
+    }
+
+    for(auto tid : toRemove) {
+        m_threads.erase(tid);
+    }
+    return toReport;
+}
+
+void Process::reportThreadLifecycleEvent(const StopReason& reason)
+{
+    if(m_threadLifecycleCallback) {
+        m_threadLifecycleCallback(reason);
+    }
+    if(m_target) {
+        m_target->notifyThreadLifecycleEvent(reason);
+    }
+}
+
+std::optional<StopReason> Process::handleSignal(StopReason reason, bool isMainStop)
+{
+    auto tid = reason.tid;
+
+    if(reason.trapReason && *reason.trapReason == TrapType::Clone && isMainStop) {
+        return std::nullopt;
+    }
+
+    if(m_isAttached && reason.reason == ProcessState::Stopped) {
+        if(!m_threads.count(tid)) {
+            m_threads.emplace(tid, ThreadState{tid, Registers(*this, tid)});
+            reportThreadLifecycleEvent(reason);
+            if(isMainStop) {
+                return std::nullopt;
+            }
+        }
+
+        if(m_threads.at(tid).pendingSigStop && reason.info == SIGSTOP) {
+            m_threads.at(tid).pendingSigStop = false;
+            return std::nullopt;
+        }
+
+        readAllRegisters(tid);
+        augmentStopReason(reason);
+
+        if(reason.info == SIGTRAP) {
+            auto instructionBegin = getProgramCounter(tid) - 1;
+            if(reason.trapReason == TrapType::SoftwareBreak
+               && m_breakpointSites.containsAddress(instructionBegin)
+               && m_breakpointSites.getByAddress(instructionBegin).isEnabled()) {
+                setProgramCounter(instructionBegin, tid);
+
+                auto& bp = m_breakpointSites.getByAddress(instructionBegin);
+                if(bp.m_parent) {
+                    bool shouldRestart = bp.m_parent->notifyHit();
+                    if(shouldRestart && isMainStop) {
+                        return std::nullopt;
+                    }
+                }
+            } else if(reason.trapReason == TrapType::HardwareBreak) {
+                auto id = getCurrentHardwareStoppoint(tid);
+                if(id.index() == 1) {
+                    m_watchpoints.getById(std::get<1>(id)).updateData();
+                }
+            } else if(reason.trapReason == TrapType::Syscall && isMainStop
+                      && shouldResumeFromSyscall(reason)) {
+                return std::nullopt;
+            }
+        }
+
+        if(m_target) {
+            m_target->notifyStop(reason);
+        }
+    }
+
+    return reason;
+}
+
+void Process::swallowPendingSigstop(pid_t tid)
+{
+    if(m_threads.at(tid).pendingSigStop) {
+        ptrace(PTRACE_CONT, tid, nullptr, nullptr);
+        waitpid(tid, nullptr, 0);
+        m_threads.at(tid).pendingSigStop = false;
+    }
+}
+
+void Process::sendContinue(pid_t tid)
+{
+    auto request = m_syscallCatchPolicy.getMode() == SyscallCatchPolicy::Mode::None
+                     ? PTRACE_CONT
+                     : PTRACE_SYSCALL;
+    if(ptrace(request, tid, nullptr, nullptr) < 0) {
+        Error::sendErrno("Could not resume");
+    }
+    m_threads.at(tid).state = ProcessState::Running;
+    m_state                 = ProcessState::Running;
+}
+
+void Process::stepOverBreakpoint(pid_t tid)
+{
+    auto pc = getProgramCounter(tid);
+    if(breakpointSites().enabledStoppointAtAddress(pc)) {
+        auto& bp = m_breakpointSites.getByAddress(pc);
+        bp.disable();
+        swallowPendingSigstop(tid);
+        if(ptrace(PTRACE_SINGLESTEP, tid, nullptr, nullptr) < 0) {
+            Error::sendErrno("Failed to single step");
+        }
+        int waitStatus;
+        if(waitpid(tid, &waitStatus, 0) < 0) {
+            Error::sendErrno("waitpid failed");
+        }
+        bp.enable();
+    }
 }
 
 } // namespace pdb

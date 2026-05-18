@@ -12,6 +12,7 @@
 
 #include <csignal>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <optional>
 #include <unordered_map>
@@ -32,6 +33,7 @@ enum class TrapType
     SoftwareBreak,
     HardwareBreak,
     Syscall,
+    Clone,
     Unknown,
 };
 
@@ -48,13 +50,15 @@ struct SyscallInformation
 struct StopReason
 {
     StopReason() = default;
-    StopReason(int waitStatus);
-    StopReason(ProcessState reason, uint8_t info, std::optional<TrapType> trapReason = std::nullopt,
+    StopReason(pid_t tid, int waitStatus);
+    StopReason(pid_t tid, ProcessState reason, uint8_t info,
+               std::optional<TrapType> trapReason            = std::nullopt,
                std::optional<SyscallInformation> syscallInfo = std::nullopt)
         : reason(reason)
         , info(info)
         , trapReason(trapReason)
         , syscallInfo(syscallInfo)
+        , tid(tid)
     { }
 
     bool isStep() const
@@ -73,6 +77,7 @@ struct StopReason
     uint8_t info;
     std::optional<TrapType> trapReason;
     std::optional<SyscallInformation> syscallInfo;
+    pid_t tid;
 };
 
 class SyscallCatchPolicy
@@ -107,6 +112,15 @@ private:
 
 class Target;
 
+struct ThreadState
+{
+    pid_t tid;
+    Registers regs;
+    StopReason reason;
+    ProcessState state{ProcessState::Stopped};
+    bool pendingSigStop{false};
+};
+
 class Process
 {
 public:
@@ -119,30 +133,23 @@ public:
                                            std::optional<int> stdoutReplacement = std::nullopt);
     static std::unique_ptr<Process> attach(pid_t pid);
 
-    void resume();
-    StopReason waitOnSignal();
+    void resume(std::optional<pid_t> otid = std::nullopt);
+    StopReason waitOnSignal(pid_t toAwait = -1);
 
     pid_t pid() const { return m_pid; }
     ProcessState state() const { return m_state; }
 
-    Registers& getRegisters() { return *m_registers; }
-    const Registers& getRegisters() const { return *m_registers; }
+    Registers& getRegisters(std::optional<pid_t> otid = std::nullopt);
+    const Registers& getRegisters(std::optional<pid_t> otid = std::nullopt) const;
 
-    void writeUserArea(size_t offset, uint64_t data);
+    void writeUserArea(size_t offset, uint64_t data, std::optional<pid_t> otid = std::nullopt);
+    void writeFprs(const user_fpregs_struct& fprs, std::optional<pid_t> otid = std::nullopt);
+    void writeGprs(const user_regs_struct& gprs, std::optional<pid_t> otid = std::nullopt);
 
-    void writeFprs(const user_fpregs_struct& fprs);
-    void writeGprs(const user_regs_struct& gprs);
+    VirtAddr getProgramCounter(std::optional<pid_t> otid = std::nullopt) const;
+    void setProgramCounter(VirtAddr address, std::optional<pid_t> otid = std::nullopt);
 
-    VirtAddr getProgramCounter() const
-    {
-        return VirtAddr{getRegisters().readByIdAs<uint64_t>(RegisterId::rip)};
-    }
-    void setProgramCounter(VirtAddr address)
-    {
-        getRegisters().writeById(RegisterId::rip, address.addr());
-    }
-
-    StopReason stepInstruction();
+    StopReason stepInstruction(std::optional<pid_t> otid = std::nullopt);
 
     BreakpointSite& createBreakpointSite(VirtAddr address, bool hardware = false,
                                          bool internal = false);
@@ -173,36 +180,63 @@ public:
     StoppointCollection<Watchpoint>& watchpoints() { return m_watchpoints; }
     const StoppointCollection<Watchpoint>& watchpoints() const { return m_watchpoints; }
 
-    std::variant<BreakpointSite::IdType, Watchpoint::IdType> getCurrentHardwareStoppoint() const;
+    std::variant<BreakpointSite::IdType, Watchpoint::IdType>
+    getCurrentHardwareStoppoint(std::optional<pid_t> otid = std::nullopt) const;
 
     void setSyscallCatchPolicy(SyscallCatchPolicy info) { m_syscallCatchPolicy = std::move(info); }
 
-    StopReason maybeResumeFromSyscall(const StopReason& reason);
+    bool shouldResumeFromSyscall(const StopReason& reason);
 
     std::unordered_map<int, uint64_t> getAuxv() const;
 
     void setTarget(Target* target) { m_target = target; }
 
+    void setCurrentThread(pid_t tid) { m_currentThread = tid; }
+    pid_t currentThread() const { return m_currentThread; }
+
+    std::unordered_map<pid_t, ThreadState>& threadStates() { return m_threads; }
+    const std::unordered_map<pid_t, ThreadState>& threadStates() const { return m_threads; }
+
+    void populateExistingThreads();
+
+    void stopRunningThreads();
+    void resumeAllThreads();
+
+    std::optional<StopReason> cleanupExitedThreads(pid_t mainStopTid);
+    void reportThreadLifecycleEvent(const StopReason& reason);
+
+    std::optional<StopReason> handleSignal(StopReason reason, bool isMainStop);
+
+    void installThreadLifecycleCallback(std::function<void(const StopReason&)> callback) {
+        m_threadLifecycleCallback = std::move(callback);
+    }
+
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 
-    void readAllRegisters();
+    void readAllRegisters(pid_t tid);
 
     int setHardwareStoppoint(VirtAddr address, StoppointMode mode, size_t size);
 
     void augmentStopReason(StopReason& reason);
+
+    void swallowPendingSigstop(pid_t tid);
+    void sendContinue(pid_t tid);
+    void stepOverBreakpoint(pid_t tid);
 
 private:
     pid_t m_pid{0};
     bool m_terminateOnEnd{true};
     ProcessState m_state{ProcessState::Stopped};
     bool m_isAttached{true};
-    std::unique_ptr<Registers> m_registers;
     StoppointCollection<BreakpointSite> m_breakpointSites;
     StoppointCollection<Watchpoint> m_watchpoints;
     SyscallCatchPolicy m_syscallCatchPolicy{SyscallCatchPolicy::catchNone()};
     bool m_expectingSyscallExit{false};
     Target* m_target{nullptr};
+    pid_t m_currentThread{0};
+    std::unordered_map<pid_t, ThreadState> m_threads;
+    std::function<void(const StopReason&)> m_threadLifecycleCallback;
 };
 
 } // namespace pdb

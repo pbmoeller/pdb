@@ -13,6 +13,16 @@
 
 namespace pdb {
 
+struct Thread
+{
+    Thread(ThreadState* state, Stack frames)
+        : state(state)
+        , frames(frames)
+    { }
+    ThreadState* state;
+    Stack frames;
+};
+
 class Target
 {
 public:
@@ -26,19 +36,26 @@ public:
 
     Process& getProcess() { return *m_process; }
     const Process& getProcess() const { return *m_process; }
-    Stack& getStack() { return m_stack; }
-    const Stack& getStack() const { return m_stack; }
+    Stack& getStack(std::optional<pid_t> otid = std::nullopt)
+    {
+        auto tid = otid.value_or(m_process->currentThread());
+        return m_threads.at(tid).frames;
+    }
+    const Stack& getStack(std::optional<pid_t> otid = std::nullopt) const
+    {
+        return const_cast<Target*>(this)->getStack();
+    }
 
     void notifyStop(const StopReason& reason);
 
-    FileAddr getPcFileAddress() const;
+    FileAddr getPcFileAddress(std::optional<pid_t> otid = std::nullopt) const;
 
-    StopReason stepIn();
-    StopReason stepOver();
-    StopReason stepOut();
+    StopReason stepIn(std::optional<pid_t> otid = std::nullopt);
+    StopReason stepOver(std::optional<pid_t> otid = std::nullopt);
+    StopReason stepOut(std::optional<pid_t> otid = std::nullopt);
 
-    LineTable::Iterator lineEntryAtPc() const;
-    StopReason runUntilAddress(VirtAddr address);
+    LineTable::Iterator lineEntryAtPc(std::optional<pid_t> otid = std::nullopt) const;
+    StopReason runUntilAddress(VirtAddr address, std::optional<pid_t> otid = std::nullopt);
 
     struct FindFunctionResult
     {
@@ -69,13 +86,21 @@ public:
     std::vector<LineTable::Iterator> getLineEntriesByLine(std::filesystem::path path,
                                                           std::size_t line) const;
 
+    std::unordered_map<pid_t, Thread>& threads() { return m_threads; }
+    const std::unordered_map<pid_t, Thread>& threads() const { return m_threads; }
+
+    void notifyThreadLifecycleEvent(const StopReason& reason);
+
 private:
     Target(std::unique_ptr<Process> proc, std::unique_ptr<Elf> obj)
         : m_process(std::move(proc))
-        , m_stack(this)
         , m_mainElf(obj.get())
     {
         m_elves.push(std::move(obj));
+        auto pid = m_process->pid();
+        for(auto& [tid, state] : m_process->threadStates()) {
+            m_threads.emplace(tid, Thread(&state, Stack{this, tid}));
+        }
     }
 
     void resolveDynamicLinkerRendezvous();
@@ -84,7 +109,7 @@ private:
     std::unique_ptr<Process> m_process;
     ElfCollection m_elves;
     Elf* m_mainElf;
-    Stack m_stack;
+    std::unordered_map<pid_t, Thread> m_threads;
     StoppointCollection<Breakpoint> m_breakpoints;
     VirtAddr m_dynamicLinkerRendezvousAddress;
 };

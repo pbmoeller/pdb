@@ -136,11 +136,11 @@ std::string formatHexJoin(std::string_view format, const R& r)
 std::string getSigtrapInfo(const pdb::Process& process, pdb::StopReason reason)
 {
     if(reason.trapReason == pdb::TrapType::SoftwareBreak) {
-        auto& site = process.breakpointSites().getByAddress(process.getProgramCounter());
+        auto& site = process.breakpointSites().getByAddress(process.getProgramCounter(reason.tid));
         return std::format(" (breakpoint {})", site.id());
     }
     if(reason.trapReason == pdb::TrapType::HardwareBreak) {
-        auto id = process.getCurrentHardwareStoppoint();
+        auto id = process.getCurrentHardwareStoppoint(reason.tid);
 
         if(id.index() == 0) {
             return std::format(" (breakpoint {})", std::get<0>(id));
@@ -181,11 +181,11 @@ std::string getSigtrapInfo(const pdb::Process& process, pdb::StopReason reason)
 std::string getSignalStopReason(const pdb::Target& target, pdb::StopReason reason)
 {
     auto& process = target.getProcess();
-    auto pc       = process.getProgramCounter();
+    auto pc       = process.getProgramCounter(reason.tid);
     std::string message =
         std::format("stopped with signal {} at {:#x}", sigabbrev_np(reason.info), pc.addr());
 
-    auto line = target.lineEntryAtPc();
+    auto line = target.lineEntryAtPc(reason.tid);
     if(line != pdb::LineTable::Iterator()) {
         auto file = line->fileEntry->path.filename().string();
         message += std::format(", {}:{}", file, line->line);
@@ -202,6 +202,23 @@ std::string getSignalStopReason(const pdb::Target& target, pdb::StopReason reaso
     return message;
 }
 
+void threadLifecycleCallback(const pdb::StopReason& reason)
+{
+    std::string_view action;
+    switch(reason.reason) {
+        case pdb::ProcessState::Exited:
+            action = "exited";
+            break;
+        case pdb::ProcessState::Terminated:
+            action = "terminated";
+            break;
+        case pdb::ProcessState::Stopped:
+            action = "created";
+            break;
+    }
+    std::cout << std::format("Thread {} {}\n", reason.tid, action);
+}
+
 } // namespace
 
 void printStopReason(const pdb::Target& target, const pdb::StopReason& reason)
@@ -211,20 +228,21 @@ void printStopReason(const pdb::Target& target, const pdb::StopReason& reason)
     switch(reason.reason) {
         case pdb::ProcessState::Stopped:
         {
-            message = getSignalStopReason(target, reason);
+            std::cout << std::format("Thread {} {}\n", reason.tid,
+                                     getSignalStopReason(target, reason));
             break;
         }
         case pdb::ProcessState::Exited:
-            message = std::format("Exited with status {}", static_cast<int>(reason.info));
+            std::cout << std::format("Process {} exited with status {}\n", target.getProcess().pid(),
+                                     static_cast<int>(reason.info));
             break;
         case pdb::ProcessState::Terminated:
-            message = std::format("Terminated with signal {}", sigabbrev_np(reason.info));
+            std::cout << std::format("Process {} terminated with signal {}\n",
+                                     target.getProcess().pid(), sigabbrev_np(reason.info));
             break;
         default:
             break;
     }
-
-    std::cout << std::format("Process {} {}", target.getProcess().pid(), message) << std::endl;
 }
 
 void printCodeLocation(pdb::Target& target)
@@ -260,6 +278,7 @@ void printHelp(const std::vector<std::string>& args)
     register    - Commands for operating on registers
     step        - Step-in
     stepi       - Single instruction step
+    thread      - Commands for operating on threads
     up          - Select the stack frame above current one
     watchpoint  - Commands for operating on watchpoints
 )";
@@ -303,6 +322,11 @@ void printHelp(const std::vector<std::string>& args)
     syscall
     syscall none
     syscall <list of syscall ID's or names>
+)";
+    } else if(isPrefix(args[1], "thread")) {
+        std::cerr << R"(Available commands
+    list
+    select <thread ID>
 )";
     } else {
         std::cerr << "No help available on that\n";
@@ -765,6 +789,33 @@ void handleCatchpointCommand(pdb::Process& process, const std::vector<std::strin
     }
 }
 
+void handleThreadCommand(pdb::Target& target, const std::vector<std::string>& args)
+{
+    if(args.size() < 2) {
+        printHelp({"help", "thread"});
+        return;
+    }
+
+    if(isPrefix(args[1], "list")) {
+        for(auto& [tid, thread] : target.threads()) {
+            auto prefix = tid == target.getProcess().currentThread() ? "*" : " ";
+            std::cout << std::format("{}Thread {}: {}\n", prefix, tid,
+                                     getSignalStopReason(target, thread.state->reason));
+        }
+    } else if(isPrefix(args[1], "select")) {
+        if(args.size() != 3) {
+            printHelp({"help", "thread"});
+            return;
+        }
+        auto tid = pdb::toIntegral<pid_t>(args[2]);
+        if(!tid) {
+            std::cerr << "Invalid thread id\n";
+            return;
+        }
+        target.getProcess().setCurrentThread(*tid);
+    }
+}
+
 void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
 {
     auto args    = split(line, ' ');
@@ -772,7 +823,7 @@ void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
     auto process = &target->getProcess();
 
     if(isPrefix(command, "continue")) {
-        process->resume();
+        process->resumeAllThreads();
         auto reason = process->waitOnSignal();
         handleStop(*target, reason);
     } else if(isPrefix(command, "help")) {
@@ -809,6 +860,8 @@ void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
         handleWatchpointCommand(*process, args);
     } else if(isPrefix(command, "catchpoint")) {
         handleCatchpointCommand(*process, args);
+    } else if(isPrefix(command, "thread")) {
+        handleThreadCommand(*target, args);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
     }
@@ -819,6 +872,10 @@ void mainLoop(std::unique_ptr<pdb::Target>& target)
     char* line = nullptr;
     while((line = readline("pdb> ")) != nullptr) {
         std::string lineStr;
+
+        if(line == std::string_view("quit")) {
+            break;
+        }
 
         if(line == std::string_view("")) {
             free(line);
@@ -852,6 +909,7 @@ int main(int argc, char** argv)
         auto target  = attach(argc, argv);
         g_pdbProcess = &target->getProcess();
         signal(SIGINT, handleSigint);
+        target->getProcess().installThreadLifecycleCallback(threadLifecycleCallback);
         mainLoop(target);
     } catch(const pdb::Error& e) {
         std::cout << e.what() << '\n';
