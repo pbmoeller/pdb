@@ -792,3 +792,60 @@ TEST_CASE("Multi-threading works", "[threads]")
     REQUIRE(reason.reason == pdb::ProcessState::Exited);
     close(devNull);
 }
+
+TEST_CASE("Can read global integer variable", "[variable]")
+{
+    auto target = pdb::Target::launch("targets/global_variable");
+    auto& proc  = target->getProcess();
+
+    target->createFunctionBreakpoint("main").enable();
+    proc.resume();
+    proc.waitOnSignal();
+
+    auto varDie = target->getMainElf().getDwarf().findGlobalVariable("g_int");
+    auto varLoc =
+        varDie.value()[DW_AT_location].asEvaluatedLocation(proc, proc.getRegisters(), false);
+    auto res = target->readLocationData(varLoc, 8);
+    auto val = pdb::fromBytes<uint64_t>(res.data());
+
+    REQUIRE(val == 0);
+
+    target->stepOver();
+    res = target->readLocationData(varLoc, 8);
+    val = pdb::fromBytes<uint64_t>(res.data());
+
+    REQUIRE(val == 10);
+
+    target->stepOver();
+    res = target->readLocationData(varLoc, 8);
+    val = pdb::fromBytes<uint64_t>(res.data());
+
+    REQUIRE(val == 42);
+}
+
+TEST_CASE("DWARF expression work", "[dwarf]")
+{
+    std::vector<uint8_t> pieceData = {DW_OP_reg16,     DW_OP_piece, 4,    DW_OP_piece, 8,
+                                      DW_OP_const4u,   0xFF,        0xFF, 0xFF,        0xFF,
+                                      DW_OP_bit_piece, 5,           12};
+
+    auto target = pdb::Target::launch("targets/step");
+    auto& proc  = target->getProcess();
+
+    pdb::Span<const std::byte> data{reinterpret_cast<std::byte*>(pieceData.data()),
+                                    pieceData.size()};
+    auto expr = pdb::DwarfExpression(target->getMainElf().getDwarf(), data, false);
+    auto res = expr.eval(proc, proc.getRegisters());
+
+    auto &pieces = std::get<pdb::DwarfExpression::PiecesResult>(res).pieces;
+    REQUIRE(pieces.size() == 3);
+    REQUIRE(pieces[0].bitSize == 4 * 8);
+    REQUIRE(pieces[1].bitSize == 8 * 8);
+    REQUIRE(pieces[2].bitSize == 5);
+    REQUIRE(std::get<pdb::DwarfExpression::RegisterResult>(pieces[0].location).regNum == 16);
+    REQUIRE(std::get_if<pdb::DwarfExpression::EmptyResult>(&pieces[1].location) != nullptr);
+    REQUIRE(std::get<pdb::DwarfExpression::AddressResult>(pieces[2].location).address.addr() == 0xFFFFFFFF);
+    REQUIRE(pieces[0].offset == 0);
+    REQUIRE(pieces[1].offset == 0);
+    REQUIRE(pieces[2].offset == 12);
+}

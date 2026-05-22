@@ -91,6 +91,9 @@ public:
 
     void notifyThreadLifecycleEvent(const StopReason& reason);
 
+    std::vector<std::byte> readLocationData(const DwarfExpression::Result& loc, size_t size,
+                                            std::optional<pid_t> otid = std::nullopt) const;
+
 private:
     Target(std::unique_ptr<Process> proc, std::unique_ptr<Elf> obj)
         : m_process(std::move(proc))

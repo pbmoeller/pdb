@@ -29,6 +29,7 @@ add_test_cpp_target(step)
 add_test_cpp_target(force_inline)
 add_test_cpp_target(marshmallow)
 add_test_cpp_target(multi_threaded)
+add_test_cpp_target(global_variable)
 
 add_library(meow SHARED 
     "libmeow.cpp"

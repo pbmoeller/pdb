@@ -200,6 +200,79 @@ private:
     const std::byte* m_pos;
 };
 
+class Dwarf;
+
+class DwarfExpression
+{
+public:
+    struct AddressResult
+    {
+        VirtAddr address;
+    };
+    struct RegisterResult
+    {
+        uint64_t regNum;
+    };
+    struct DataResult
+    {
+        Span<const std::byte> data;
+    };
+    struct LiteralResult
+    {
+        uint64_t value;
+    };
+    struct EmptyResult
+    { };
+
+    using SimpleLocation =
+        std::variant<AddressResult, RegisterResult, DataResult, LiteralResult, EmptyResult>;
+
+    struct PiecesResult
+    {
+        struct Piece
+        {
+            SimpleLocation location;
+            uint64_t bitSize;
+            uint64_t offset{0};
+        };
+        std::vector<Piece> pieces;
+    };
+    using Result = std::variant<SimpleLocation, PiecesResult>;
+
+public:
+    DwarfExpression(const Dwarf& parent, Span<const std::byte> exprData, bool inFrameInfo)
+        : m_parent(&parent)
+        , m_exprData(exprData)
+        , m_inFrameInfo(inFrameInfo)
+    { }
+
+    Result eval(const Process& proc, const Registers& regs, bool pushCfa = false) const;
+
+private:
+    const Dwarf* m_parent;
+    Span<const std::byte> m_exprData;
+    bool m_inFrameInfo;
+};
+
+class LocationList
+{
+public:
+    LocationList(const Dwarf& parent, const CompileUnit& cu, Span<const std::byte> exprData,
+                 bool inFrameInfo)
+        : m_parent(&parent)
+        , m_cu(&cu)
+        , m_exprData(exprData)
+        , m_inFrameInfo(inFrameInfo) { };
+
+    DwarfExpression::Result eval(const Process& proc, const Registers& regs);
+
+private:
+    const Dwarf* m_parent;
+    const CompileUnit* m_cu;
+    Span<const std::byte> m_exprData;
+    bool m_inFrameInfo;
+};
+
 class Attr
 {
 public:
@@ -221,6 +294,11 @@ public:
     Die asReference() const;
 
     RangeList asRangeList() const;
+    DwarfExpression asExpression(bool inFrameInfo) const;
+    LocationList asLocationList(bool inFrameInfo) const;
+
+    DwarfExpression::Result asEvaluatedLocation(const Process& proc, const Registers& regs,
+                                                bool inFrameInfo) const;
 
 private:
     const CompileUnit* m_cu;
@@ -398,7 +476,7 @@ public:
 
     const CommonInformationEntry& getCie(FileOffset at) const;
 
-    Registers unwind(const Process &proc, FileAddr pc, Registers &regs) const;
+    Registers unwind(const Process& proc, FileAddr pc, Registers& regs) const;
 
 private:
     const Dwarf* m_dwarf;
@@ -420,6 +498,7 @@ public:
     std::optional<Die> functionContainingAddress(FileAddr address) const;
 
     std::vector<Die> findFunctions(std::string name) const;
+    std::optional<Die> findGlobalVariable(std::string name) const;
 
     LineTable::Iterator lineEntryAtAddress(FileAddr address) const;
 
@@ -429,7 +508,7 @@ public:
 
 private:
     void index() const;
-    void indexDie(const Die& current) const;
+    void indexDie(const Die& current, bool inFunction = false) const;
 
 private:
     const Elf* m_elf;
@@ -444,6 +523,7 @@ private:
     };
     mutable std::unordered_multimap<std::string, IndexEntry> m_functionIndex;
     std::unique_ptr<CallFrameInformation> m_cfi;
+    mutable std::unordered_multimap<std::string, IndexEntry> m_globalVariableIndex;
 };
 
 } // namespace pdb

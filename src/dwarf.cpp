@@ -6,6 +6,7 @@
 #include <libpdb/types.hpp>
 
 #include <algorithm>
+#include <functional>
 #include <string_view>
 #include <variant>
 
@@ -543,30 +544,44 @@ struct RegisterRule
 {
     uint32_t reg;
 };
+struct ExprRule
+{
+    DwarfExpression expr;
+};
+struct ValExprRule
+{
+    DwarfExpression expr;
+};
 struct CfaRegisterRule
 {
     uint32_t reg;
     int64_t offset;
+};
+struct CfaExprRule
+{
+    DwarfExpression expr;
 };
 
 struct UnwindContext
 {
     Cursor cur{{nullptr, nullptr}};
     FileAddr location;
-    CfaRegisterRule cfaRule;
 
-    using Rule    = std::variant<UndefinedRule, SameRule, OffsetRule, ValOffsetRule, RegisterRule>;
-    using Ruleset = std::unordered_map<uint32_t, Rule>;
+    using Rule = std::variant<UndefinedRule, SameRule, OffsetRule, ValOffsetRule, RegisterRule,
+                              ExprRule, ValExprRule>;
+    using CfaRuleType = std::variant<CfaRegisterRule, CfaExprRule>;
+    using Ruleset     = std::unordered_map<uint32_t, Rule>;
     Ruleset cieRegisterRules;
     Ruleset registerRules;
-    std::vector<std::pair<Ruleset, CfaRegisterRule>> ruleStack;
+    CfaRuleType cfaRule;
+    std::vector<std::pair<Ruleset, CfaRuleType>> ruleStack;
 };
 
 void executeCfiInstruction(const Elf& elf, const CallFrameInformation::FrameDescriptionEntry& fde,
                            UnwindContext& ctx, FileAddr pc)
 {
     auto& cie = *fde.cie;
-    auto& cur  = ctx.cur;
+    auto& cur = ctx.cur;
 
     auto textSectionStart = *elf.getSectionStartAddress(".text");
     auto pltStart         = elf.getSectionStartAddress(".got.plt").value_or(FileAddr{});
@@ -610,24 +625,30 @@ void executeCfiInstruction(const Elf& elf, const CallFrameInformation::FrameDesc
                 ctx.location += cur.u32() * cie.codeAlignmentFactor;
                 break;
             case DW_CFA_def_cfa:
-                ctx.cfaRule.reg    = cur.uleb128();
-                ctx.cfaRule.offset = cur.uleb128();
+                ctx.cfaRule = CfaRegisterRule{static_cast<uint32_t>(cur.uleb128()),
+                                              static_cast<uint32_t>(cur.uleb128())};
                 break;
             case DW_CFA_def_cfa_sf:
-                ctx.cfaRule.reg    = cur.uleb128();
-                ctx.cfaRule.offset = cur.sleb128() * cie.dataAlignmentFactor;
+                ctx.cfaRule = CfaRegisterRule{static_cast<uint32_t>(cur.uleb128()),
+                                              cur.sleb128() * cie.dataAlignmentFactor};
                 break;
             case DW_CFA_def_cfa_register:
-                ctx.cfaRule.reg = cur.uleb128();
+                std::get<CfaRegisterRule>(ctx.cfaRule).reg = cur.uleb128();
                 break;
             case DW_CFA_def_cfa_offset:
-                ctx.cfaRule.offset = cur.uleb128();
+                std::get<CfaRegisterRule>(ctx.cfaRule).offset = cur.uleb128();
                 break;
             case DW_CFA_def_cfa_offset_sf:
-                ctx.cfaRule.offset = cur.sleb128() * cie.dataAlignmentFactor;
+                std::get<CfaRegisterRule>(ctx.cfaRule).offset =
+                    cur.sleb128() * cie.dataAlignmentFactor;
                 break;
             case DW_CFA_def_cfa_expression:
-                Error::send("DWARF expression not yet implemented");
+            {
+                auto length = cur.uleb128();
+                auto expr   = DwarfExpression{elf, {cur.position(), cur.position() + length}, true};
+                ctx.cfaRule = CfaExprRule{expr};
+                break;
+            }
             case DW_CFA_undefined:
                 ctx.registerRules.emplace(cur.uleb128(), UndefinedRule{});
                 break;
@@ -660,6 +681,7 @@ void executeCfiInstruction(const Elf& elf, const CallFrameInformation::FrameDesc
                 auto reg    = cur.uleb128();
                 auto offset = cur.sleb128() * cie.dataAlignmentFactor;
                 ctx.registerRules.emplace(reg, ValOffsetRule{offset});
+                break;
             }
             case DW_CFA_register:
             {
@@ -668,9 +690,21 @@ void executeCfiInstruction(const Elf& elf, const CallFrameInformation::FrameDesc
                 break;
             }
             case DW_CFA_expression:
-                Error::send("DWARF expressions not yet implemented");
+            {
+                auto reg    = cur.uleb128();
+                auto length = cur.uleb128();
+                auto expr   = DwarfExpression{elf, {cur.position(), cur.position() + length}, true};
+                ctx.registerRules.emplace(reg, ExprRule{expr});
+                break;
+            }
             case DW_CFA_val_expression:
-                Error::send("DWARF expressions not yet implemented");
+            {
+                auto reg    = cur.uleb128();
+                auto length = cur.uleb128();
+                auto expr   = DwarfExpression{elf, {cur.position(), cur.position() + length}, true};
+                ctx.registerRules.emplace(reg, ValExprRule{expr});
+                break;
+            }
             case DW_CFA_restore_extended:
             {
                 auto reg = cur.uleb128();
@@ -694,9 +728,23 @@ void executeCfiInstruction(const Elf& elf, const CallFrameInformation::FrameDesc
 Registers executeUnwindRules(UnwindContext& ctx, Registers& oldRegs, const Process& proc)
 {
     auto unwoundRegs = oldRegs;
-    auto cfaRegInfo  = registerInfoByDwarf(ctx.cfaRule.reg);
-    auto cfa         = std::get<uint64_t>(oldRegs.read(cfaRegInfo)) + ctx.cfaRule.offset;
+
+    auto dwexpAddrResult = [&](const auto& res) {
+        auto& loc     = std::get<DwarfExpression::SimpleLocation>(res);
+        auto& addrRes = std::get<DwarfExpression::AddressResult>(loc);
+        return VirtAddr{addrRes.address.addr()};
+    };
+
+    uint64_t cfa;
+    if(auto regRule = std::get_if<CfaRegisterRule>(&ctx.cfaRule)) {
+        auto regInfo = registerInfoByDwarf(regRule->reg);
+        cfa          = std::get<uint64_t>(oldRegs.read(regInfo)) + regRule->offset;
+    } else if(auto expr = std::get_if<CfaExprRule>(&ctx.cfaRule)) {
+        auto res = expr->expr.eval(proc, oldRegs);
+        cfa      = dwexpAddrResult(res).addr();
+    }
     oldRegs.setCfa(VirtAddr{cfa});
+
     unwoundRegs.writeById(RegisterId::rsp, {cfa}, false);
 
     for(auto [reg, rule] : ctx.registerRules) {
@@ -716,9 +764,30 @@ Registers executeUnwindRules(UnwindContext& ctx, Registers& oldRegs, const Proce
         } else if(auto valOffset = std::get_if<ValOffsetRule>(&rule)) {
             auto addr = cfa + valOffset->offset;
             unwoundRegs.write(regInfo, {addr}, false);
+        } else if(auto expr = std::get_if<ExprRule>(&rule)) {
+            auto res   = expr->expr.eval(proc, oldRegs, true);
+            auto addr  = dwexpAddrResult(res);
+            auto value = proc.readMemoryAs<uint64_t>(addr);
+            unwoundRegs.write(regInfo, {value}, false);
+        } else if(auto valExpr = std::get_if<ValExprRule>(&rule)) {
+            auto res  = valExpr->expr.eval(proc, oldRegs, true);
+            auto addr = dwexpAddrResult(res);
+            unwoundRegs.write(regInfo, {addr.addr()}, false);
         }
     }
     return unwoundRegs;
+}
+
+VirtAddr readFrameBaseResult(const DwarfExpression::Result& loc, const Registers& regs)
+{
+    auto simpleLoc = std::get_if<DwarfExpression::SimpleLocation>(&loc);
+    if(!simpleLoc) {
+        Error::send("Unsupported frame base location");
+    }
+    if(auto addrRes = std::get_if<DwarfExpression::AddressResult>(simpleLoc)) {
+        return addrRes->address;
+    }
+    Error::send("Unsupported frame base location");
 }
 
 } // namespace
@@ -958,6 +1027,343 @@ bool LineTable::Iterator::executeInstruction()
     return emitted;
 }
 
+// DwarfExpression
+
+DwarfExpression::Result DwarfExpression::eval(const Process& proc, const Registers& regs,
+                                              bool pushCfa) const
+{
+    Cursor cur({m_exprData.begin(), m_exprData.end()});
+    std::vector<uint64_t> stack;
+    if(pushCfa) {
+        stack.push_back(regs.cfa().addr());
+    }
+
+    std::optional<SimpleLocation> mostRecentLocation;
+    std::vector<PiecesResult::Piece> pieces;
+
+    bool resultIsAddress = true;
+
+    auto binop = [&](auto op) {
+        auto rhs = stack.back();
+        stack.pop_back();
+        auto lhs = stack.back();
+        stack.pop_back();
+        stack.push_back(op(lhs, rhs));
+    };
+    auto relop = [&](auto op) {
+        auto rhs = static_cast<int64_t>(stack.back());
+        stack.pop_back();
+        auto lhs = static_cast<int64_t>(stack.back());
+        stack.pop_back();
+        stack.push_back(op(lhs, rhs) ? 1 : 0);
+    };
+
+    auto virtPc = VirtAddr{regs.readByIdAs<uint64_t>(RegisterId::rip)};
+    auto pc     = virtPc.toFileAddr(*m_parent->elfFile());
+    auto func   = m_parent->functionContainingAddress(pc);
+
+    auto getCurrentLocation = [&]() {
+        SimpleLocation loc;
+        if(stack.empty()) {
+            loc = mostRecentLocation.value_or(EmptyResult{});
+            mostRecentLocation.reset();
+        } else if(resultIsAddress) {
+            loc = AddressResult{VirtAddr{stack.back()}};
+            stack.pop_back();
+        } else {
+            loc = LiteralResult{stack.back()};
+            stack.pop_back();
+            resultIsAddress = true;
+        }
+        return loc;
+    };
+
+    while(!cur.finished()) {
+        auto opcode = cur.u8();
+
+        if(opcode >= DW_OP_lit0 && opcode <= DW_OP_lit31) {
+            stack.push_back(opcode - DW_OP_lit0);
+        } else if(opcode >= DW_OP_breg0 && opcode <= DW_OP_breg31) {
+            auto reg    = opcode - DW_OP_breg0;
+            auto regVal = regs.read(registerInfoByDwarf(reg));
+            auto offset = cur.sleb128();
+            stack.push_back(std::get<uint64_t>(regVal) + offset);
+        } else if(opcode >= DW_OP_reg0 && opcode <= DW_OP_reg31) {
+            auto reg = opcode - DW_OP_reg0;
+            if(m_inFrameInfo) {
+                auto regVal = regs.read(registerInfoByDwarf(reg));
+                stack.push_back(std::get<uint64_t>(regVal));
+            } else {
+                mostRecentLocation = RegisterResult{static_cast<uint64_t>(reg)};
+            }
+        }
+
+        switch(opcode) {
+            case DW_OP_addr:
+            {
+                auto addr = FileAddr{*m_parent->elfFile(), cur.u64()};
+                stack.push_back(addr.toVirtAddr().addr());
+                break;
+            }
+            case DW_OP_const1u:
+                stack.push_back(cur.u8());
+                break;
+            case DW_OP_const1s:
+                stack.push_back(cur.s8());
+                break;
+            case DW_OP_const2u:
+                stack.push_back(cur.u16());
+                break;
+            case DW_OP_const2s:
+                stack.push_back(cur.s16());
+                break;
+            case DW_OP_const4u:
+                stack.push_back(cur.u32());
+                break;
+            case DW_OP_const4s:
+                stack.push_back(cur.s32());
+                break;
+            case DW_OP_const8u:
+                stack.push_back(cur.u64());
+                break;
+            case DW_OP_const8s:
+                stack.push_back(cur.s64());
+                break;
+            case DW_OP_constu:
+                stack.push_back(cur.uleb128());
+                break;
+            case DW_OP_consts:
+                stack.push_back(cur.sleb128());
+                break;
+            case DW_OP_bregx:
+            {
+                auto regVal = regs.read(registerInfoByDwarf(cur.uleb128()));
+                stack.push_back(std::get<uint64_t>(regVal) + cur.sleb128());
+                break;
+            }
+            case DW_OP_fbreg:
+            {
+                auto offset = cur.sleb128();
+                auto fbLoc  = func.value()[DW_AT_frame_base].asEvaluatedLocation(proc, regs, true);
+                auto fbAddr = readFrameBaseResult(fbLoc, regs);
+                stack.push_back(fbAddr.addr() + offset);
+                break;
+            }
+            case DW_OP_dup:
+                stack.push_back(stack.back());
+                break;
+            case DW_OP_drop:
+                stack.pop_back();
+                break;
+            case DW_OP_pick:
+                stack.push_back(stack.rbegin()[cur.u8()]);
+                break;
+            case DW_OP_over:
+                stack.push_back(stack.rbegin()[1]);
+                break;
+            case DW_OP_swap:
+                std::swap(stack.rbegin()[0], stack.rbegin()[1]);
+                break;
+            case DW_OP_rot:
+                std::rotate(stack.rbegin(), stack.rbegin() + 1, stack.rbegin() + 3);
+                break;
+            case DW_OP_deref:
+            {
+                auto addr    = VirtAddr{stack.back()};
+                stack.back() = proc.readMemoryAs<uint64_t>(addr);
+                break;
+            }
+            case DW_OP_deref_size:
+            {
+                auto addr       = VirtAddr{stack.back()};
+                auto sizeToRead = cur.u8();
+                auto mem        = proc.readMemory(addr, sizeToRead);
+                uint64_t res{0};
+                std::copy(mem.data(), mem.data() + mem.size(), reinterpret_cast<std::byte*>(&res));
+                stack.back() = res;
+                break;
+            }
+            case DW_OP_xderef:
+                Error::send("DW_OP_xderef not supported");
+            case DW_OP_xderef_size:
+                Error::send("DW_OP_xderef size not supported");
+            case DW_OP_push_object_address:
+                Error::send("Unsupported opcode DW_OP_push_address");
+            case DW_OP_form_tls_address:
+                Error::send("Unsupported opcode DW_OP_form_tls_address");
+            case DW_OP_call_frame_cfa:
+                stack.push_back(regs.cfa().addr());
+                break;
+            case DW_OP_minus:
+                binop(std::minus{});
+                break;
+            case DW_OP_mod:
+                binop(std::modulus{});
+                break;
+            case DW_OP_mul:
+                binop(std::multiplies{});
+                break;
+            case DW_OP_and:
+                binop(std::bit_and{});
+                break;
+            case DW_OP_or:
+                binop(std::bit_or{});
+                break;
+            case DW_OP_plus:
+                binop(std::plus{});
+                break;
+            case DW_OP_shl:
+                binop([](auto lhs, auto rhs) { return lhs << rhs; });
+                break;
+            case DW_OP_shr:
+                binop([](auto lhs, auto rhs) { return lhs >> rhs; });
+                break;
+            case DW_OP_shra:
+                binop([](auto lhs, auto rhs) { return static_cast<int64_t>(lhs) >> rhs; });
+                break;
+            case DW_OP_xor:
+                binop(std::bit_xor{});
+                break;
+            case DW_OP_div:
+            {
+                auto rhs = static_cast<int64_t>(stack.back());
+                stack.pop_back();
+                auto lhs = static_cast<int64_t>(stack.back());
+                stack.pop_back();
+                stack.push_back(static_cast<uint64_t>(lhs / rhs));
+                break;
+            }
+            case DW_OP_abs:
+            {
+                auto sval    = static_cast<int64_t>(stack.back());
+                sval         = std::abs(sval);
+                stack.back() = static_cast<uint64_t>(sval);
+                break;
+            }
+            case DW_OP_neg:
+            {
+                auto neg     = -static_cast<int64_t>(stack.back());
+                stack.back() = static_cast<uint64_t>(neg);
+                break;
+            }
+            case DW_OP_plus_uconst:
+                stack.back() += cur.uleb128();
+                break;
+            case DW_OP_not:
+                stack.back() = ~stack.back();
+                break;
+            case DW_OP_le:
+                relop(std::less_equal{});
+                break;
+            case DW_OP_ge:
+                relop(std::greater_equal{});
+                break;
+            case DW_OP_eq:
+                relop(std::equal_to{});
+                break;
+            case DW_OP_lt:
+                relop(std::less{});
+                break;
+            case DW_OP_gt:
+                relop(std::greater{});
+                break;
+            case DW_OP_ne:
+                relop(std::not_equal_to{});
+                break;
+            case DW_OP_skip:
+                cur += cur.s16();
+                break;
+            case DW_OP_bra:
+                if(stack.back() != 0) {
+                    cur += cur.s16();
+                }
+                stack.pop_back();
+                break;
+            case DW_OP_call2:
+                Error::send("Unsupported opcode DW_OP_call2");
+            case DW_OP_call4:
+                Error::send("Unsupported opcode DW_OP_call4");
+            case DW_OP_call_ref:
+                Error::send("Unsupported opcode DW_OP_call_ref");
+            case DW_OP_regx:
+            {
+                if(m_inFrameInfo) {
+                    auto regVal = regs.read(registerInfoByDwarf(cur.uleb128()));
+                    stack.push_back(std::get<uint64_t>(regVal));
+                } else {
+                    mostRecentLocation = RegisterResult{cur.uleb128()};
+                }
+                break;
+            }
+            case DW_OP_implicit_value:
+            {
+                auto length        = cur.uleb128();
+                mostRecentLocation = DataResult{Span<const std::byte>{cur.position(), length}};
+                break;
+            }
+            case DW_OP_stack_value:
+            {
+                resultIsAddress = false;
+                break;
+            }
+            case DW_OP_nop:
+                break;
+            case DW_OP_piece:
+            {
+                auto byteSize      = cur.uleb128();
+                SimpleLocation loc = getCurrentLocation();
+                pieces.push_back(PiecesResult::Piece{loc, byteSize * 8});
+                break;
+            }
+            case DW_OP_bit_piece:
+            {
+                auto bitSize       = cur.uleb128();
+                auto offset        = cur.uleb128();
+                SimpleLocation loc = getCurrentLocation();
+                pieces.push_back(PiecesResult::Piece{loc, bitSize, offset});
+                break;
+            }
+        }
+    }
+
+    if(!pieces.empty()) {
+        return PiecesResult{pieces};
+    }
+
+    return getCurrentLocation();
+}
+
+DwarfExpression::Result LocationList::eval(const Process& proc, const Registers& regs)
+{
+    auto virtPc = VirtAddr{regs.readByIdAs<uint64_t>(RegisterId::rip)};
+    auto pc     = virtPc.toFileAddr(*m_parent->elfFile());
+    auto func   = m_parent->functionContainingAddress(pc);
+
+    Cursor cur({m_exprData.begin(), m_exprData.end()});
+    constexpr auto baseAddressFlag = ~static_cast<uint64_t>(0);
+    auto baseAddress               = m_cu->root()[DW_AT_low_pc].asAddress().addr();
+
+    auto first  = cur.u64();
+    auto second = cur.u64();
+    while(!(first == 0 && second == 0)) {
+        if(first == baseAddressFlag) {
+            baseAddress = second;
+        } else {
+            auto length = cur.u16();
+            if(pc.addr() >= baseAddress + first && pc.addr() < baseAddress + second) {
+                DwarfExpression expr(*m_parent, {cur.position(), cur.position() + length},
+                                     m_inFrameInfo);
+                return expr.eval(proc, regs);
+            } else {
+                cur += length;
+            }
+        }
+        first  = cur.u64();
+        second = cur.u64();
+    }
+    return DwarfExpression::EmptyResult{};
+}
+
 // Attr
 
 FileAddr Attr::asAddress() const
@@ -1093,6 +1499,38 @@ RangeList Attr::asRangeList() const
         root.contains(DW_AT_low_pc) ? root[DW_AT_low_pc].asAddress() : FileAddr{};
 
     return {m_cu, data, baseAddress};
+}
+
+DwarfExpression Attr::asExpression(bool inFrameInfo) const
+{
+    Cursor cur({m_location, m_cu->data().end()});
+    auto length = cur.uleb128();
+    Span<const std::byte> data{cur.position(), length};
+    return DwarfExpression{*m_cu->dwarfInfo(), data, inFrameInfo};
+}
+
+LocationList Attr::asLocationList(bool inFrameInfo) const
+{
+    auto section = m_cu->dwarfInfo()->elfFile()->getSectionContents(".debug_loc");
+    Cursor cur({m_location, m_cu->data().end()});
+    auto offset = cur.u32();
+
+    Span<const std::byte> data(section.begin() + offset, section.end());
+    return LocationList{*m_cu->dwarfInfo(), *m_cu, data, inFrameInfo};
+}
+
+DwarfExpression::Result Attr::asEvaluatedLocation(const Process& proc, const Registers& regs,
+                                                  bool inFrameInfo) const
+{
+    if(m_form == DW_FORM_exprloc) {
+        auto expr = asExpression(inFrameInfo);
+        return expr.eval(proc, regs);
+    } else if(m_form == DW_FORM_sec_offset) {
+        auto locList = asLocationList(inFrameInfo);
+        return locList.eval(proc, regs);
+    } else {
+        Error::send("Invalid location type");
+    }
 }
 
 // CompileUnit
@@ -1412,6 +1850,17 @@ std::vector<Die> Dwarf::findFunctions(std::string name) const
     return found;
 }
 
+std::optional<Die> Dwarf::findGlobalVariable(std::string name) const
+{
+    index();
+    auto it = m_globalVariableIndex.find(name);
+    if(it != m_globalVariableIndex.end()) {
+        Cursor cur({it->second.pos, it->second.cu->data().end()});
+        return parseDie(*it->second.cu, cur);
+    }
+    return std::nullopt;
+}
+
 LineTable::Iterator Dwarf::lineEntryAtAddress(FileAddr address) const
 {
     auto cu = compileUnitContainingAddress(address);
@@ -1453,7 +1902,7 @@ void Dwarf::index() const
     }
 }
 
-void Dwarf::indexDie(const Die& current) const
+void Dwarf::indexDie(const Die& current, bool inFunction) const
 {
     bool hasRange   = current.contains(DW_AT_low_pc) || current.contains(DW_AT_ranges);
     bool isFunction = current.abbrevEntry()->tag == DW_TAG_subprogram
@@ -1463,6 +1912,17 @@ void Dwarf::indexDie(const Die& current) const
             IndexEntry entry{current.cu(), current.position()};
             m_functionIndex.emplace(*name, entry);
         }
+    }
+    auto hasLocation = current.contains(DW_AT_location);
+    auto isVariable  = current.abbrevEntry()->tag == DW_TAG_variable;
+    if(hasLocation && isVariable && !inFunction) {
+        if(auto name = current.name()) {
+            IndexEntry entry{current.cu(), current.position()};
+            m_globalVariableIndex.emplace(*name, entry);
+        }
+    }
+    if(isFunction) {
+        inFunction = true;
     }
     for(auto child : current.children()) {
         indexDie(child);

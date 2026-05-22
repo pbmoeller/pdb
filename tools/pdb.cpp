@@ -233,8 +233,8 @@ void printStopReason(const pdb::Target& target, const pdb::StopReason& reason)
             break;
         }
         case pdb::ProcessState::Exited:
-            std::cout << std::format("Process {} exited with status {}\n", target.getProcess().pid(),
-                                     static_cast<int>(reason.info));
+            std::cout << std::format("Process {} exited with status {}\n",
+                                     target.getProcess().pid(), static_cast<int>(reason.info));
             break;
         case pdb::ProcessState::Terminated:
             std::cout << std::format("Process {} terminated with signal {}\n",
@@ -280,6 +280,7 @@ void printHelp(const std::vector<std::string>& args)
     stepi       - Single instruction step
     thread      - Commands for operating on threads
     up          - Select the stack frame above current one
+    variable    - Commands for operating on variables
     watchpoint  - Commands for operating on watchpoints
 )";
     } else if(isPrefix(args[1], "register")) {
@@ -327,6 +328,10 @@ void printHelp(const std::vector<std::string>& args)
         std::cerr << R"(Available commands
     list
     select <thread ID>
+)";
+    } else if(isPrefix(args[1], "variable")) {
+        std::cerr << R"(Available commands
+    read < variable>
 )";
     } else {
         std::cerr << "No help available on that\n";
@@ -816,6 +821,24 @@ void handleThreadCommand(pdb::Target& target, const std::vector<std::string>& ar
     }
 }
 
+void handleVariableCommand(pdb::Target& target, const std::vector<std::string>& args)
+{
+    if(args.size() < 3) {
+        printHelp({"help", "variable"});
+        return;
+    }
+
+    if(isPrefix(args[1], "read")) {
+        auto die = target.getMainElf().getDwarf().findGlobalVariable(args[2]);
+        auto loc = die.value()[DW_AT_location].asEvaluatedLocation(
+            target.getProcess(), target.getStack().currentFrame().regs, false);
+        auto value = target.readLocationData(loc, 8);
+        uint64_t res = 0;
+        std::copy(value.begin(), value.end(), reinterpret_cast<std::byte*>(&res));
+        std::cout << "Value: " << res << "\n";
+    }
+}
+
 void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
 {
     auto args    = split(line, ' ');
@@ -862,6 +885,8 @@ void handleCommand(std::unique_ptr<pdb::Target>& target, std::string_view line)
         handleCatchpointCommand(*process, args);
     } else if(isPrefix(command, "thread")) {
         handleThreadCommand(*target, args);
+    } else if(isPrefix(command, "variable")) {
+        handleVariableCommand(*target, args);
     } else {
         std::cerr << "Unknown command: " << command << "\n";
     }

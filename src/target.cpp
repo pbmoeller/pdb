@@ -34,6 +34,20 @@ std::filesystem::path dumpVdso(const Process& proc, VirtAddr address)
     return vdsoDumpPath;
 }
 
+void memcpyBits(uint8_t* dest, uint32_t destBit, const uint8_t* src, uint32_t srcBit,
+                uint32_t nBits)
+{
+    for(; nBits; --nBits, ++srcBit, ++destBit) {
+        uint8_t destMask = 1 << (destBit % 8);
+        dest[destBit / 8] &= ~destMask;
+        auto srcMask                = 1 << (srcBit % 8);
+        auto correspondingSrcBitSet = src[srcBit / 8] & srcMask;
+        if(correspondingSrcBitSet) {
+            dest[destBit / 8] |= destMask;
+        }
+    }
+}
+
 } // namespace
 
 std::unique_ptr<Target> Target::launch(std::filesystem::path path,
@@ -310,6 +324,50 @@ void Target::notifyThreadLifecycleEvent(const StopReason& reason)
     } else {
         m_threads.erase(tid);
     }
+}
+
+std::vector<std::byte> Target::readLocationData(const DwarfExpression::Result& loc, size_t size,
+                                                std::optional<pid_t> otid) const
+{
+    auto tid = otid.value_or(m_process->currentThread());
+
+    if(auto simpleLoc = std::get_if<DwarfExpression::SimpleLocation>(&loc)) {
+        if(auto regLoc = std::get_if<DwarfExpression::RegisterResult>(simpleLoc)) {
+            auto regInfo  = registerInfoByDwarf(regLoc->regNum);
+            auto regValue = m_threads.at(tid).frames.currentFrame().regs.read(regInfo);
+            auto getBytes = [](auto value) {
+                std::vector<std::byte> bytes(sizeof(value));
+                auto begin = reinterpret_cast<const std::byte*>(&value);
+                std::copy(begin, begin + sizeof(value), bytes.data());
+                return bytes;
+            };
+            return std::visit(getBytes, regValue);
+        } else if(auto addrRes = std::get_if<DwarfExpression::AddressResult>(simpleLoc)) {
+            return m_process->readMemory(addrRes->address, size);
+        } else if(auto dataRes = std::get_if<DwarfExpression::DataResult>(simpleLoc)) {
+            return {dataRes->data.begin(), dataRes->data.end()};
+        } else if(auto literalRes = std::get_if<DwarfExpression::LiteralResult>(simpleLoc)) {
+            auto begin = reinterpret_cast<const std::byte*>(&literalRes->value);
+            return {begin, begin + size};
+        }
+    } else if(auto piecesRes = std::get_if<DwarfExpression::PiecesResult>(&loc)) {
+        std::vector<std::byte> data(size);
+        size_t offset = 0;
+        for(auto& piece : piecesRes->pieces) {
+            auto byteSize  = (piece.bitSize + 7) / 8;
+            auto pieceData = readLocationData(piece.location, byteSize, otid);
+            if(offset % 8 == 0 && piece.offset == 0 && piece.bitSize % 8 == 0) {
+                std::copy(pieceData.begin(), pieceData.end(), data.begin() + offset / 8);
+                offset += piece.bitSize;
+            } else {
+                auto dest = reinterpret_cast<uint8_t*>(data.data());
+                auto src  = reinterpret_cast<uint8_t*>(pieceData.data());
+                memcpyBits(dest, 0, src, piece.offset, piece.bitSize);
+            }
+        }
+        return data;
+    }
+    Error::send("Invalid location type");
 }
 
 void Target::resolveDynamicLinkerRendezvous()
