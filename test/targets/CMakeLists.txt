@@ -30,6 +30,8 @@ add_test_cpp_target(force_inline)
 add_test_cpp_target(marshmallow)
 add_test_cpp_target(multi_threaded)
 add_test_cpp_target(global_variable)
+add_test_cpp_target(member_pointer)
+add_test_cpp_target(blocks)
 
 add_library(meow SHARED 
     "libmeow.cpp"

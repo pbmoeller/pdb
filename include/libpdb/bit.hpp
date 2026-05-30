@@ -4,8 +4,8 @@
 #include <libpdb/types.hpp>
 
 #include <cstring>
-#include <vector>
 #include <string_view>
+#include <vector>
 
 namespace pdb {
 
@@ -53,6 +53,20 @@ inline std::string_view toStringView(const std::byte* data, size_t size)
 inline std::string_view toStringView(const std::vector<std::byte>& data)
 {
     return toStringView(data.data(), data.size());
+}
+
+inline void memcpyBits(uint8_t* dest, uint32_t destBit, const uint8_t* src, uint32_t srcBit,
+                       uint32_t nBits)
+{
+    for(; nBits; --nBits, ++srcBit, ++destBit) {
+        uint8_t destMask = 1 << (destBit % 8);
+        dest[destBit / 8] &= ~destMask;
+        auto srcMask                = 1 << (srcBit % 8);
+        auto correspondingSrcBitSet = src[srcBit / 8] & srcMask;
+        if(correspondingSrcBitSet) {
+            dest[destBit / 8] |= destMask;
+        }
+    }
 }
 
 } // namespace pdb

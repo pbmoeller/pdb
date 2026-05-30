@@ -1,6 +1,8 @@
 #include <libpdb/bit.hpp>
 #include <libpdb/disassembler.hpp>
+#include <libpdb/parse.hpp>
 #include <libpdb/target.hpp>
+#include <libpdb/type.hpp>
 #include <libpdb/types.hpp>
 
 #include <cxxabi.h>
@@ -34,18 +36,26 @@ std::filesystem::path dumpVdso(const Process& proc, VirtAddr address)
     return vdsoDumpPath;
 }
 
-void memcpyBits(uint8_t* dest, uint32_t destBit, const uint8_t* src, uint32_t srcBit,
-                uint32_t nBits)
+TypedData getInitialVariableData(const Target& target, std::string name, FileAddr pc)
 {
-    for(; nBits; --nBits, ++srcBit, ++destBit) {
-        uint8_t destMask = 1 << (destBit % 8);
-        dest[destBit / 8] &= ~destMask;
-        auto srcMask                = 1 << (srcBit % 8);
-        auto correspondingSrcBitSet = src[srcBit / 8] & srcMask;
-        if(correspondingSrcBitSet) {
-            dest[destBit / 8] |= destMask;
+    auto var = target.findVariable(name, pc);
+    if(!var) {
+        Error::send("Variable not found");
+    }
+
+    auto varType = var.value()[DW_AT_type].asType();
+
+    auto loc = var.value()[DW_AT_location].asEvaluatedLocation(
+        target.getProcess(), target.getStack().currentFrame().regs, false);
+    auto dataVec = target.readLocationData(loc, varType.byteSize());
+
+    std::optional<VirtAddr> address;
+    if(auto singleLoc = std::get_if<DwarfExpression::SimpleLocation>(&loc)) {
+        if(auto addrRes = std::get_if<DwarfExpression::AddressResult>(singleLoc)) {
+            address = addrRes->address;
         }
     }
+    return {std::move(dataVec), varType, address};
 }
 
 } // namespace
@@ -368,6 +378,62 @@ std::vector<std::byte> Target::readLocationData(const DwarfExpression::Result& l
         return data;
     }
     Error::send("Invalid location type");
+}
+
+TypedData Target::resolveIndirectName(std::string name, FileAddr pc) const
+{
+    auto opPos = name.find_first_of(".-[");
+
+    auto varName = name.substr(0, opPos);
+    auto& dwarf  = pc.elfFile()->getDwarf();
+
+    auto data = getInitialVariableData(*this, varName, pc);
+    while(opPos != std::string::npos) {
+        if(name[opPos] == '-') {
+            if(name[opPos + 1] != '>') {
+                Error::send("Invalid operator");
+            }
+            data = data.derefPointer(getProcess());
+            opPos++;
+        }
+        if(name[opPos] == '.' || name[opPos] == '>') {
+            auto memberNameStart = opPos + 1;
+            opPos                = name.find_first_of(".-[", memberNameStart);
+            auto memberName      = name.substr(memberNameStart, opPos - memberNameStart);
+            data                 = data.readMember(getProcess(), memberName);
+            name                 = name.substr(memberNameStart);
+        } else if(name[opPos] == '[') {
+            auto intEnd   = name.find(']', opPos);
+            auto indexStr = name.substr(opPos + 1, intEnd - opPos - 1);
+            auto index    = toIntegral<size_t>(indexStr);
+            if(!index) {
+                Error::send("Invalid index");
+            }
+            data = data.index(getProcess(), *index);
+            name = name.substr(intEnd + 1);
+        }
+        opPos = name.find_first_of(".-[");
+    }
+
+    return data;
+}
+
+std::optional<Die> Target::findVariable(std::string name, FileAddr pc) const
+{
+    auto& dwarf = pc.elfFile()->getDwarf();
+    auto local  = dwarf.findLocalVariable(name, pc);
+    if(local) {
+        return local;
+    }
+    std::optional<Die> global = std::nullopt;
+    m_elves.forEach([&](auto& elf) {
+        auto& dwarf = elf.getDwarf();
+        auto found  = dwarf.findGlobalVariable(name);
+        if(found) {
+            global = *found;
+        }
+    });
+    return global;
 }
 
 void Target::resolveDynamicLinkerRendezvous()

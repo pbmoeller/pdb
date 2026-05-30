@@ -211,6 +211,8 @@ public:
         m_threadLifecycleCallback = std::move(callback);
     }
 
+    std::string readString(VirtAddr address) const;
+
 private:
     Process(pid_t pid, bool terminateOnEnd, bool isAttached);
 

@@ -741,4 +741,18 @@ void Process::stepOverBreakpoint(pid_t tid)
     }
 }
 
+std::string Process::readString(VirtAddr address) const
+{
+    std::string ret;
+    while(true) {
+        auto data = readMemory(address, 1024);
+        for(auto c : data) {
+            if(c == std::byte{0}) {
+                return ret;
+            }
+            ret.push_back(static_cast<char>(c));
+        }
+    }
+}
+
 } // namespace pdb

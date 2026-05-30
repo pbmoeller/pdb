@@ -5,6 +5,7 @@
 #include <libpdb/process.hpp>
 #include <libpdb/syscalls.hpp>
 #include <libpdb/target.hpp>
+#include <libpdb/type.hpp>
 
 #include <editline/readline.h>
 
@@ -22,6 +23,7 @@
 #include <sstream>
 #include <string>
 #include <string_view>
+#include <unordered_set>
 #include <vector>
 
 namespace {
@@ -821,9 +823,74 @@ void handleThreadCommand(pdb::Target& target, const std::vector<std::string>& ar
     }
 }
 
+void handleVariableLocalsCommand(pdb::Target& target)
+{
+    auto pc     = target.getPcFileAddress();
+    auto scopes = pc.elfFile()->getDwarf().scopesAtAddress(pc);
+    std::unordered_set<std::string> seen;
+    for(auto& scope : scopes) {
+        for(auto& var : scope.children()) {
+            std::string name(var.name().value_or(""));
+            auto tag = var.abbrevEntry()->tag;
+            if(tag == DW_TAG_variable
+               || tag == DW_TAG_formal_parameter && !name.empty() && !seen.count(name)) {
+                auto loc = var[DW_AT_location].asEvaluatedLocation(
+                    target.getProcess(), target.getStack().currentFrame().regs, false);
+                auto type  = var[DW_AT_type].asType();
+                auto value = target.readLocationData(loc, type.byteSize());
+                auto str   = pdb::TypedData{std::move(value), type}.visualize(target.getProcess());
+                std::cout << std::format("{}: {}\n", name, str);
+                seen.insert(name);
+            }
+        }
+    }
+}
+
+void handleVariableReadCommand(pdb::Target& target, const std::vector<std::string>& args)
+{
+    auto name = args[2];
+    auto pc   = target.getPcFileAddress();
+    auto data = target.resolveIndirectName(name, pc);
+    auto str  = data.visualize(target.getProcess());
+    std::cout << std::format("Value: {}\n", str);
+}
+
+void handleVariableLocationCommand(pdb::Target& target, const std::vector<std::string>& args)
+{
+    auto name = args[2];
+    auto pc   = target.getPcFileAddress();
+    auto var  = target.findVariable(name, pc);
+    if(!var) {
+        std::cerr << "Variable not found!\n";
+        return;
+    }
+
+    auto loc = var.value()[DW_AT_location].asEvaluatedLocation(
+        target.getProcess(), target.getStack().currentFrame().regs, false);
+    auto printSimpleLocation = [](auto* loc) {
+        if(auto regLoc = std::get_if<pdb::DwarfExpression::RegisterResult>(loc)) {
+            auto name = pdb::registerInfoByDwarf(regLoc->regNum).name;
+            std::cout << std::format("Register: {}\n", name);
+        } else if(auto addRes = std::get_if<pdb::DwarfExpression::AddressResult>(loc)) {
+            std::cout << std::format("Address: {:#x}\n", addRes->address.addr());
+        } else {
+            std::cout << "None";
+        }
+    };
+
+    if(auto simpleLoc = std::get_if<pdb::DwarfExpression::SimpleLocation>(&loc)) {
+        printSimpleLocation(simpleLoc);
+    } else if(auto piecesRes = std::get_if<pdb::DwarfExpression::PiecesResult>(&loc)) {
+        for(auto& piece : piecesRes->pieces) {
+            std::cout << std::format("Piece: offset = {}, bit size = {}, location = ", piece.offset, piece.bitSize);
+            printSimpleLocation(&piece.location);
+        }
+    }
+}
+
 void handleVariableCommand(pdb::Target& target, const std::vector<std::string>& args)
 {
-    if(args.size() < 3) {
+    /*if(args.size() < 3) {
         printHelp({"help", "variable"});
         return;
     }
@@ -832,10 +899,31 @@ void handleVariableCommand(pdb::Target& target, const std::vector<std::string>& 
         auto die = target.getMainElf().getDwarf().findGlobalVariable(args[2]);
         auto loc = die.value()[DW_AT_location].asEvaluatedLocation(
             target.getProcess(), target.getStack().currentFrame().regs, false);
-        auto value = target.readLocationData(loc, 8);
+        auto value   = target.readLocationData(loc, 8);
         uint64_t res = 0;
         std::copy(value.begin(), value.end(), reinterpret_cast<std::byte*>(&res));
         std::cout << "Value: " << res << "\n";
+    }*/
+
+    if(args.size() < 2) {
+        printHelp({"help", "variable"});
+        return;
+    }
+
+    if(isPrefix(args[1], "locals")) {
+        handleVariableLocalsCommand(target);
+        return;
+    }
+
+    if(args.size() < 3) {
+        printHelp({"help", "variable"});
+        return;
+    }
+
+    if(isPrefix(args[1], "read")) {
+        handleVariableReadCommand(target, args);
+    } else if(isPrefix(args[1], "location")) {
+        handleVariableLocationCommand(target, args);
     }
 }
 

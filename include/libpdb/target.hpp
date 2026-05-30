@@ -23,6 +23,8 @@ struct Thread
     Stack frames;
 };
 
+class TypedData;
+
 class Target
 {
 public:
@@ -93,6 +95,9 @@ public:
 
     std::vector<std::byte> readLocationData(const DwarfExpression::Result& loc, size_t size,
                                             std::optional<pid_t> otid = std::nullopt) const;
+
+    TypedData resolveIndirectName(std::string name, FileAddr pc) const;
+    std::optional<Die> findVariable(std::string name, FileAddr pc) const;
 
 private:
     Target(std::unique_ptr<Process> proc, std::unique_ptr<Elf> obj)

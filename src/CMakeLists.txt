@@ -32,6 +32,7 @@ set(LIBPDB_SOURCES
     "syscalls.cpp"
     "stack.cpp"
     "target.cpp"
+    "type.cpp"
     "types.cpp"
     "watchpoint.cpp"
 )

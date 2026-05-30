@@ -13,6 +13,7 @@
 
 namespace pdb {
 
+class Type;
 class Die;
 class Dwarf;
 class Elf;
@@ -300,6 +301,8 @@ public:
     DwarfExpression::Result asEvaluatedLocation(const Process& proc, const Registers& regs,
                                                 bool inFrameInfo) const;
 
+    Type asType() const;
+
 private:
     const CompileUnit* m_cu;
     uint64_t m_type;
@@ -370,6 +373,14 @@ public:
     SourceLocation location() const;
     const LineTable::File& file() const;
     uint64_t line() const;
+
+    struct BitfieldInformation
+    {
+        uint64_t bitSize;
+        uint64_t storageByteSize;
+        uint8_t bitOffset;
+    };
+    std::optional<BitfieldInformation> getBitfieldInformation(uint64_t classByteSize) const;
 
 private:
     const std::byte* m_pos{nullptr};
@@ -505,6 +516,9 @@ public:
     std::vector<Die> inlineStackAtAddress(FileAddr address) const;
 
     const CallFrameInformation& cfi() const { return *m_cfi; }
+
+    std::optional<Die> findLocalVariable(std::string name, FileAddr pc) const;
+    std::vector<Die> scopesAtAddress(FileAddr address) const;
 
 private:
     void index() const;

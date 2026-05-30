@@ -3,6 +3,7 @@
 #include <libpdb/elf.hpp>
 #include <libpdb/error.hpp>
 #include <libpdb/process.hpp>
+#include <libpdb/type.hpp>
 #include <libpdb/types.hpp>
 
 #include <algorithm>
@@ -790,6 +791,16 @@ VirtAddr readFrameBaseResult(const DwarfExpression::Result& loc, const Registers
     Error::send("Unsupported frame base location");
 }
 
+void scopesAtAddressInDie(const Die& die, FileAddr address, std::vector<Die>& scopes)
+{
+    for(auto& c : die.children()) {
+        if(c.containsAddress(address)) {
+            scopesAtAddressInDie(c, address, scopes);
+            scopes.push_back(c);
+        }
+    }
+}
+
 } // namespace
 
 // RangeList
@@ -1533,6 +1544,11 @@ DwarfExpression::Result Attr::asEvaluatedLocation(const Process& proc, const Reg
     }
 }
 
+Type Attr::asType() const
+{
+    return Type{asReference()};
+}
+
 // CompileUnit
 
 CompileUnit::CompileUnit(Dwarf& parent, Span<const std::byte> data, size_t abbrevOffset)
@@ -1665,6 +1681,26 @@ uint64_t Die::line() const
         return (*this)[DW_AT_call_line].asInt();
     }
     return (*this)[DW_AT_decl_line].asInt();
+}
+
+std::optional<Die::BitfieldInformation> Die::getBitfieldInformation(uint64_t classByteSize) const
+{
+    if(!contains(DW_AT_bit_offset) && !contains(DW_AT_data_bit_offset)) {
+        return std::nullopt;
+    }
+    auto bitSize = (*this)[DW_AT_bit_size].asInt();
+    auto storageByteSize =
+        contains(DW_AT_byte_size) ? (*this)[DW_AT_byte_size].asInt() : classByteSize;
+    auto storageBitSize = storageByteSize * 8;
+    uint8_t bitOffset   = 0;
+    if(contains(DW_AT_bit_offset)) {
+        auto offsetField = (*this)[DW_AT_bit_offset].asInt();
+        bitOffset        = storageBitSize - offsetField - bitSize;
+    }
+    if(contains(DW_AT_data_bit_offset)) {
+        bitOffset = (*this)[DW_AT_data_bit_offset].asInt() % 8;
+    }
+    return BitfieldInformation{bitSize, storageByteSize, bitOffset};
 }
 
 // Die::ChildrenRange::Iterator
@@ -1890,6 +1926,33 @@ std::vector<Die> Dwarf::inlineStackAtAddress(FileAddr address) const
         }
     }
     return stack;
+}
+
+std::optional<Die> Dwarf::findLocalVariable(std::string name, FileAddr pc) const
+{
+    auto scopes = scopesAtAddress(pc);
+    for(auto& scope : scopes) {
+        for(auto& child : scope.children()) {
+            auto tag = child.abbrevEntry()->tag;
+            if((tag == DW_TAG_variable || tag == DW_TAG_formal_parameter) && child.name() == name) {
+                return child;
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+std::vector<Die> Dwarf::scopesAtAddress(FileAddr address) const
+{
+    auto func = functionContainingAddress(address);
+    if(!func) {
+        return {};
+    }
+
+    std::vector<Die> scopes;
+    scopesAtAddressInDie(*func, address, scopes);
+    scopes.push_back(*func);
+    return scopes;
 }
 
 void Dwarf::index() const

@@ -7,6 +7,7 @@
 #include <libpdb/registers.hpp>
 #include <libpdb/syscalls.hpp>
 #include <libpdb/target.hpp>
+#include <libpdb/type.hpp>
 
 #include <catch2/catch_test_macros.hpp>
 
@@ -835,17 +836,83 @@ TEST_CASE("DWARF expression work", "[dwarf]")
     pdb::Span<const std::byte> data{reinterpret_cast<std::byte*>(pieceData.data()),
                                     pieceData.size()};
     auto expr = pdb::DwarfExpression(target->getMainElf().getDwarf(), data, false);
-    auto res = expr.eval(proc, proc.getRegisters());
+    auto res  = expr.eval(proc, proc.getRegisters());
 
-    auto &pieces = std::get<pdb::DwarfExpression::PiecesResult>(res).pieces;
+    auto& pieces = std::get<pdb::DwarfExpression::PiecesResult>(res).pieces;
     REQUIRE(pieces.size() == 3);
     REQUIRE(pieces[0].bitSize == 4 * 8);
     REQUIRE(pieces[1].bitSize == 8 * 8);
     REQUIRE(pieces[2].bitSize == 5);
     REQUIRE(std::get<pdb::DwarfExpression::RegisterResult>(pieces[0].location).regNum == 16);
     REQUIRE(std::get_if<pdb::DwarfExpression::EmptyResult>(&pieces[1].location) != nullptr);
-    REQUIRE(std::get<pdb::DwarfExpression::AddressResult>(pieces[2].location).address.addr() == 0xFFFFFFFF);
+    REQUIRE(std::get<pdb::DwarfExpression::AddressResult>(pieces[2].location).address.addr()
+            == 0xFFFFFFFF);
     REQUIRE(pieces[0].offset == 0);
     REQUIRE(pieces[1].offset == 0);
     REQUIRE(pieces[2].offset == 12);
+}
+
+TEST_CASE("Global variables", "[variable]")
+{
+    auto target = pdb::Target::launch("targets/global_variable");
+    auto& proc  = target->getProcess();
+
+    target->createFunctionBreakpoint("main").enable();
+    proc.resume();
+    proc.waitOnSignal();
+
+    auto name    = target->resolveIndirectName("sy.pets[0].name", target->getPcFileAddress());
+    auto nameVis = name.visualize(target->getProcess());
+    REQUIRE(nameVis == "\"Marshmallow\"");
+
+    auto cats   = target->resolveIndirectName("cats[1].age", target->getPcFileAddress());
+    auto catVis = cats.visualize(target->getProcess());
+    REQUIRE(catVis == "8");
+}
+
+TEST_CASE("Local variables", "[variable]")
+{
+    auto devNull = open("/dev/null", O_WRONLY);
+    auto target  = pdb::Target::launch("targets/blocks", devNull);
+    auto& proc   = target->getProcess();
+
+    target->createFunctionBreakpoint("main").enable();
+    proc.resume();
+    proc.waitOnSignal();
+    target->stepOver();
+
+    auto varData = target->resolveIndirectName("i", target->getPcFileAddress());
+    REQUIRE(pdb::fromBytes<uint32_t>(varData.dataPtr()) == 1);
+
+    target->stepOver();
+    target->stepOver();
+
+    varData = target->resolveIndirectName("i", target->getPcFileAddress());
+    REQUIRE(pdb::fromBytes<uint32_t>(varData.dataPtr()) == 2);
+
+    target->stepOver();
+    target->stepOver();
+
+    varData = target->resolveIndirectName("i", target->getPcFileAddress());
+    REQUIRE(pdb::fromBytes<uint32_t>(varData.dataPtr()) == 3);
+
+    close(devNull);
+}
+
+TEST_CASE("Member pointers", "[variable]")
+{
+    auto target = pdb::Target::launch("targets/member_pointer");
+    auto& proc = target->getProcess();
+
+    target->createLineBreakpoint("member_pointer.cpp", 14).enable();
+    proc.resume();
+    proc.waitOnSignal();
+
+    auto dataPtr = target->resolveIndirectName("dataPtr", target->getPcFileAddress());
+    auto dataVis = dataPtr.visualize(proc);
+    REQUIRE(dataVis == "0x0");
+
+    auto funcPtr = target->resolveIndirectName("funcPtr", target->getPcFileAddress());
+    auto funcVis = funcPtr.visualize(proc);
+    REQUIRE(funcVis != "0x0");
 }
